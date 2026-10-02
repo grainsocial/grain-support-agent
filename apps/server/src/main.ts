@@ -99,15 +99,17 @@ function resumeInterrupted(): void {
 const wakeTriage = worker("triage", 30_000, async () => {
   const item = next("new");
   if (!item) return false;
-  // A classifier report was already scored by Clef in the appview; asking again
-  // learns nothing. It goes to the agent for a brief of the evidence, and on to
-  // a person, who decides. Without an agent it goes to the person directly.
-  if (item.source === "classifier") {
+  // A report, from a classifier or a person, is a moderation matter, and
+  // triage's questions are about bugs: they would only send it to review. It
+  // goes to the agent for a brief of the evidence, then on to a person, who
+  // decides. Without an agent it goes to the person directly.
+  if (item.source !== "bluesky") {
+    const what = item.source === "classifier" ? "classifier report" : "in-app report";
     if (hasOpenRouter) {
-      update(item.id, { status: "investigate", route_reason: "classifier report: gathering evidence" });
+      update(item.id, { status: "investigate", route_reason: `${what}: gathering evidence` });
       wakeInvestigator();
     } else {
-      update(item.id, { status: "needs_review", route_reason: "classifier report" });
+      update(item.id, { status: "needs_review", route_reason: what });
     }
     return true;
   }

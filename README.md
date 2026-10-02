@@ -5,12 +5,13 @@ what comes in from outside, sorts it, and investigates the things that look
 like bugs, so a person starts from a report instead of a raw post.
 
 ```
-Bluesky mentions ─┐                         ┌─ dismissed (not about grain, spam)
-                  ├─► queue ─► Clef triage ─┼─ needs review (moderation, unsure)
-in-app reports ───┘                         ├─ triaged (praise, questions, requests)
-                                            └─ investigate ─► opencode + OpenRouter ─► report
+Bluesky mentions ─► queue ─► Clef triage ─┬─ dismissed (not about grain, spam)
+                                          ├─ needs review (moderation, unsure)
+                                          ├─ triaged (praise, questions, requests)
+                                          └─ investigate ─► opencode + OpenRouter ─► report
 
-classifier reports ─► queue ─► moderation brief (opencode, read-only) ─► needs you
+in-app reports ─────┐
+classifier reports ─┴─► queue ─► moderation brief (opencode, read-only) ─► needs you
 ```
 
 - **Ingest.** The grain.social account's notifications (mentions, replies,
@@ -18,11 +19,13 @@ classifier reports ─► queue ─► moderation brief (opencode, read-only) �
   A report the appview's classifiers filed (`reported_by` is `system:<name>`)
   comes in as its own kind of item, linked to the page on grain.social that
   shows its subject.
-- **Moderation briefs.** A classifier report skips triage, since Clef already
-  scored it in the appview. The investigate agent gathers what a moderator
+- **Moderation briefs.** A report, from a classifier or a person in the app,
+  skips triage: Clef already scored a classifier's, and triage's questions are
+  about bugs. The investigate agent gathers what a moderator
   would look up, the scores and what the model was shown, the account's
-  other posts, earlier reports, labels and takedowns, and writes a brief with a
-  suggested outcome. It decides nothing; the item lands in front of a person,
+  other posts, earlier reports, labels and takedowns, and for a person's
+  report, the reporter's own history, and writes a brief with a suggested
+  outcome. A person's reason is fenced off as untrusted text. It decides nothing; the item lands in front of a person,
   who acts in grain's `/admin`. A photo's image is a link in the item, never
   an attachment, so opening a nudity report does not put the picture on
   screen. Briefs count toward `INVESTIGATIONS_PER_DAY`.

@@ -57,7 +57,7 @@ export function pollReports(): number {
           text: [`Report label: ${r.label}`, `Subject: ${r.subject_uri}`, r.reason ? `Reason: ${r.reason}` : ""]
             .filter(Boolean)
             .join("\n"),
-          url: r.subject_uri,
+          url: grainUrl(r.subject_uri, (photo) => galleryOf(db, photo)),
         };
     if (enqueue({ ...item, source_ref: String(r.id), received_at: r.created_at })) added++;
     after = Math.max(after, Number(r.id));
