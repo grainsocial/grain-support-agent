@@ -1,5 +1,5 @@
 import { newSession, prompt as ask, resume } from "./opencode.ts";
-import { addCost, update, type Item } from "./store.ts";
+import type { Item } from "./store.ts";
 import { refreshWorkspace, workspace } from "./workspace.ts";
 
 // Investigation runs in opencode's `investigate` agent, in a workspace holding a
@@ -16,7 +16,7 @@ const PLATFORM_HINT: Record<string, string> = {
   web: "Triage thinks this is about the website, so start in grain/.",
 };
 
-function prompt(item: Item, checkouts: string[]): string {
+export function investigationPrompt(item: Item, checkouts: string[]): string {
   const t = item.triage;
   const triage = t
     ? `Triage: ${t.kind}, area ${t.area}, platform ${t.platform}, severity ${t.severity.toFixed(1)} of 3. ${PLATFORM_HINT[t.platform] ?? ""}`
@@ -26,6 +26,8 @@ function prompt(item: Item, checkouts: string[]): string {
 ${checkouts.map((c) => `- ${c}`).join("\n")}
 
 grain/ is the appview: the server and the website, which both mobile apps call over XRPC. grain-ios/ and grain-android/ are the native apps. Read grain/AGENTS.md before anything else.
+
+This is support item #${item.id}; the support tools take that number.
 
 Something came in from ${item.source === "bluesky" ? `a Bluesky post by @${item.author}` : "a report filed in the app"}. ${triage}
 
@@ -64,7 +66,7 @@ export async function investigate(
   const checkouts = await refreshWorkspace();
   const sessionId = await newSession(workspace, `#${item.id} ${item.triage?.kind ?? item.source}`);
   onSession(sessionId);
-  const { text, cost } = await ask(sessionId, workspace, "investigate", prompt(item, checkouts));
+  const { text, cost } = await ask(sessionId, workspace, "investigate", investigationPrompt(item, checkouts));
   return { report: text || "(the agent finished without writing a report)", cost };
 }
 
@@ -72,33 +74,4 @@ export async function investigate(
 export async function resumeInvestigation(item: Item): Promise<{ report: string; cost: number }> {
   const { text, cost } = await resume(item.session_id, workspace, "investigate");
   return { report: text || "(the agent finished without writing a report)", cost };
-}
-
-async function settleFollowUp(item: Item, run: Promise<{ cost: number }>): Promise<void> {
-  try {
-    const { cost } = await run;
-    addCost(item.id, cost);
-    update(item.id, { chat_pending: "", chat_error: "" });
-  } catch (err) {
-    update(item.id, { chat_pending: "", chat_error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-/**
- * A question from a person about an investigation, answered in the same
- * session with the same read-only tools. Recorded while it runs, so a restart
- * can pick it up.
- */
-export async function followUp(item: Item, question: string): Promise<void> {
-  if (!item.session_id) throw new Error("this item has not been investigated yet");
-  update(item.id, { chat_pending: question, chat_error: "" });
-  await settleFollowUp(
-    item,
-    refreshWorkspace().then(() => ask(item.session_id, workspace, "investigate", question)),
-  );
-}
-
-/** Picks up a follow-up a restart cut off. */
-export async function resumeFollowUp(item: Item): Promise<void> {
-  await settleFollowUp(item, resume(item.session_id, workspace, "investigate"));
 }

@@ -1,21 +1,22 @@
-import type { Part } from "@opencode-ai/sdk";
-import { transcript } from "./opencode.ts";
+import type { Message, Part } from "@opencode-ai/sdk";
 
-// What an agent is doing right now, read from its opencode session: every step
-// of the current turn, the text it has written so far, how long it has been
-// going and what it has cost. The dashboard polls this while something runs.
+// Turning an agent's messages into what the dashboard shows: each step it
+// took, in words, and what it wrote. Used for every turn in a conversation,
+// and for the one still running.
 
 export interface Step {
+  tool: string;
   label: string;
   detail: string;
   state: "running" | "done" | "failed";
 }
 
-export interface Activity {
+export interface TurnView {
   steps: Step[];
   text: string;
-  startedAt: number;
   cost: number;
+  startedAt: number;
+  ended: boolean;
 }
 
 type ToolPart = Extract<Part, { type: "tool" }>;
@@ -51,37 +52,62 @@ function describe(part: ToolPart, root: string): { label: string; detail: string
       return { label: "Listing database tables", detail: "" };
     case "grain-db_describe_table":
       return { label: "Describing table", detail: String(input.table ?? "") };
+    case "support_start_fix":
+      return { label: "Starting a fix", detail: Array.isArray(input.repos) && input.repos.length ? input.repos.join(", ") : "" };
+    case "support_revise_fix":
+      return { label: "Asking the fix agent for changes", detail: "" };
+    case "support_get_fix":
+      return { label: "Reading the fix", detail: "" };
+    case "support_propose_pr":
+      return { label: "Proposing a pull request", detail: String(input.title ?? "") };
     default:
       return { label: part.tool, detail: "" };
   }
 }
 
-/** The latest turn of a session: everything since the last message a person (or the dashboard) sent. */
-export async function activity(sessionId: string, directory: string): Promise<Activity | undefined> {
-  const messages = await transcript(sessionId, directory).catch(() => []);
-  let lastUser = -1;
-  messages.forEach((m, i) => {
-    if (m.info.role === "user") lastUser = i;
-  });
-  if (lastUser < 0) return undefined;
-
-  const turn = messages.slice(lastUser + 1);
+/** The assistant messages answering one message, as steps and text. */
+export function viewTurn(replies: { info: Message; parts: Part[] }[], root: string, startedAt: number): TurnView {
   const steps: Step[] = [];
-  let text = "";
+  const texts: string[] = [];
   let cost = 0;
-  for (const { info, parts } of turn) {
-    if (info.role === "assistant") cost += info.cost ?? 0;
+  let ended = false;
+  for (const { info, parts } of replies) {
+    if (info.role !== "assistant") continue;
+    cost += info.cost ?? 0;
+    ended = Boolean(info.error) || Boolean(info.time.completed && info.finish && info.finish !== "tool-calls");
     for (const part of parts) {
       if (part.type === "tool") {
         const status = part.state.status;
         steps.push({
-          ...describe(part, directory),
+          tool: part.tool,
+          ...describe(part, root),
           state: status === "completed" ? "done" : status === "error" ? "failed" : "running",
         });
-      } else if (part.type === "text") {
-        text = part.text;
+      } else if (part.type === "text" && part.text.trim()) {
+        texts.push(part.text.trim());
       }
     }
   }
-  return { steps, text, startedAt: messages[lastUser].info.time.created, cost };
+  return { steps, text: texts.join("\n\n"), cost, startedAt, ended };
+}
+
+/** A one-line summary of a finished turn's steps, like "read 14 files, ran 2 queries". */
+export function summarize(steps: Step[]): string {
+  const count = (pred: (s: Step) => boolean) => steps.filter(pred).length;
+  const parts: [number, string, string][] = [
+    [count((s) => s.tool === "read"), "read 1 file", "read %d files"],
+    [count((s) => s.tool === "grep" || s.tool === "glob" || s.tool === "list"), "searched once", "searched %d times"],
+    [count((s) => s.tool.startsWith("grain-db_")), "ran 1 query", "ran %d queries"],
+    [count((s) => s.tool === "edit" || s.tool === "write" || s.tool === "apply_patch" || s.tool === "patch"), "made 1 edit", "made %d edits"],
+    [count((s) => s.tool === "support_start_fix"), "started a fix", "started %d fixes"],
+    [count((s) => s.tool === "support_revise_fix"), "asked for changes to the fix", "asked for changes %d times"],
+    [count((s) => s.tool === "support_get_fix"), "read the fix", "read the fix %d times"],
+    [count((s) => s.tool === "support_propose_pr"), "proposed a pull request", "proposed a pull request %d times"],
+  ];
+  const known = parts.reduce((sum, [n]) => sum + n, 0);
+  const other = steps.length - known;
+  return [
+    ...parts.filter(([n]) => n > 0).map(([n, one, many]) => (n === 1 ? one : many.replace("%d", String(n)))),
+    ...(other > 0 ? [other === 1 ? "1 other step" : `${other} other steps`] : []),
+  ].join(", ");
 }

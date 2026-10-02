@@ -38,6 +38,8 @@ function parseRepos(spec: string): Repo[] {
 
 export const config = {
   port: int("PORT", 8080),
+  // The support tools' MCP server, for the opencode server only.
+  supportMcpPort: int("SUPPORT_MCP_PORT", 4097),
   stateDir: optional("STATE_DIR", "./state"),
 
   // The appview's live database, opened read-only. Empty disables the reports

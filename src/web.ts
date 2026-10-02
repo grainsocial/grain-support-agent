@@ -1,23 +1,22 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import MarkdownIt from "markdown-it";
-import { activity } from "./activity.ts";
-import { config } from "./config.ts";
-import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls, reviseFix, startFix } from "./fix.ts";
-import { followUp } from "./investigate.ts";
+import { summarize, viewTurn, type Step, type TurnView } from "./activity.ts";
+import { EVENT, say } from "./conversation.ts";
+import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls } from "./fix.ts";
 import { transcript } from "./opencode.ts";
 import { counts, get, list, recordFeedback, update, VIEWS, type Item, type View } from "./store.ts";
-import { AREAS, clefConfigured, fixTargets, KINDS, PLATFORMS, preselect } from "./triage.ts";
+import { AREAS, KINDS, PLATFORMS } from "./triage.ts";
 import { workspace } from "./workspace.ts";
 
-// The dashboard. Server-rendered HTML; the only client script polls the live
-// activity of a running agent. It has no login of its own: Caddy puts basic
-// auth in front of it, and inside the compose network nothing else talks to it.
+// The dashboard: the queue, and each item as a conversation with its agent.
+// Server-rendered HTML; the only client script refreshes the thread while an
+// agent works. It has no login of its own: Caddy puts basic auth in front of
+// it, and inside the compose network nothing else talks to it.
 
-
-// Reports are written by a model that has read untrusted text, so they render
-// with raw HTML off and images disabled: an image URL in a report would be
-// fetched the moment the page opens, which is how a prompt injection would
-// carry data out. Links stay, since nothing follows a link until it is clicked.
+// Agent text is written by a model that has read untrusted text, so it renders
+// with raw HTML off and images disabled: an image URL in it would be fetched
+// the moment the page opens, which is how a prompt injection would carry data
+// out. Links stay, since nothing follows a link until it is clicked.
 const markdown = new MarkdownIt({ html: false, linkify: true }).disable("image");
 const defaultLink = markdown.renderer.rules.link_open ?? ((tokens, i, opts, _env, self) => self.renderToken(tokens, i, opts));
 markdown.renderer.rules.link_open = (tokens, i, opts, env, self) => {
@@ -28,27 +27,34 @@ markdown.renderer.rules.link_open = (tokens, i, opts, env, self) => {
 
 export const renderReport = (report: string) => markdown.render(report);
 
-const esc = (s: unknown) =>
-  String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-// While an agent runs, swap in fresh activity every few seconds, then reload
-// once when it stops so the result shows. A fetch rather than a page refresh,
-// so text being typed into a form survives.
-const POLL = (id: number) => `<script>
-(function poll() {
+// While an agent works, fetch the thread every few seconds and swap it in.
+// The message box sits outside the thread, so a half-typed message survives.
+// Cmd or Ctrl+Enter sends.
+const SCRIPT = (id: number, busy: boolean) => `<script>
+const box = document.getElementById("message");
+box?.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) box.form.requestSubmit(); });
+const nearBottom = () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 160;
+${busy ? "window.scrollTo(0, document.body.scrollHeight);" : ""}
+(function poll(busy) {
+  if (!busy) return;
   setTimeout(async () => {
     try {
-      const res = await fetch("/item/${id}/activity");
-      const { busy, html } = await res.json();
-      if (!busy) return location.reload();
-      document.getElementById("activity").innerHTML = html;
+      const stick = nearBottom();
+      const res = await fetch("/item/${id}/thread");
+      const next = await res.json();
+      document.getElementById("thread").innerHTML = next.html;
+      document.getElementById("status").innerHTML = next.status;
+      if (stick) window.scrollTo(0, document.body.scrollHeight);
+      busy = next.busy;
     } catch {}
-    poll();
-  }, 3000);
-})();
+    poll(busy);
+  }, 2500);
+})(${busy});
 </script>`;
 
-function page(title: string, body: string, pollItem?: number): string {
+function page(title: string, body: string, script = ""): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -57,18 +63,18 @@ function page(title: string, body: string, pollItem?: number): string {
 <title>${esc(title)}</title>
 <style>
 :root {
-  --bg: #fafaf9; --surface: #ffffff; --text: #1c1917; --muted: #78716c;
+  --bg: #fafaf9; --surface: #ffffff; --text: #1c1917; --muted: #78716c; --mine: #eff6ff;
   --border: #e7e5e4; --accent: #2563eb; --warn: #b45309; --bad: #b91c1c; --ok: #15803d;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0c0a09; --surface: #1c1917; --text: #f5f5f4; --muted: #a8a29e;
+    --bg: #0c0a09; --surface: #1c1917; --text: #f5f5f4; --muted: #a8a29e; --mine: #172033;
     --border: #292524; --accent: #60a5fa; --warn: #f59e0b; --bad: #f87171; --ok: #4ade80;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
-main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 32px; }
 a { color: var(--accent); }
 h1 { font-size: 20px; margin: 0 0 16px; }
 nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -86,74 +92,93 @@ nav a.on { background: var(--surface); color: var(--text); border: 1px solid var
 .pill.fix-failed { color: var(--bad); border-color: currentColor; }
 .pill.fix-pr_open { color: var(--ok); border-color: currentColor; }
 .markdown { overflow-wrap: anywhere; }
-.markdown h1, .markdown h2, .markdown h3 { font-size: 15px; margin: 20px 0 6px; }
+.markdown h1, .markdown h2, .markdown h3 { font-size: 15px; margin: 18px 0 6px; }
 .markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
 .markdown p, .markdown ul, .markdown ol { margin: 0 0 10px; }
 .markdown ul, .markdown ol { padding-left: 22px; }
 .markdown code { font: 13px ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .markdown pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; }
 .markdown pre code { border: 0; padding: 0; background: none; }
-.markdown table { display: block; overflow-x: auto; margin-bottom: 10px; }
+.markdown table { display: block; overflow-x: auto; margin-bottom: 10px; border-collapse: collapse; }
 .markdown th, .markdown td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
 .markdown blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
-.turn { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
-.turn .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-.tools { font-size: 13px; color: var(--muted); margin: 4px 0 8px; }
-.tools summary { cursor: pointer; }
-.tools li { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
-textarea, input[type=text] { font: inherit; width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
-textarea { min-height: 72px; resize: vertical; }
-form.stack { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-form.stack .actions { margin-top: 0; }
-.diff { font: 12px/1.45 ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 0; overflow-x: auto; white-space: pre; }
+
+.thread { display: flex; flex-direction: column; gap: 14px; margin: 16px 0; }
+.msg { max-width: 100%; }
+.msg .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.msg.mine { align-self: flex-end; max-width: 85%; }
+.msg.mine .who { justify-content: flex-end; }
+.msg.mine .bubble { background: var(--mine); white-space: pre-wrap; overflow-wrap: anywhere; }
+.event { align-self: center; font-size: 13px; color: var(--muted); text-align: center; max-width: 90%; }
+.event a { color: inherit; }
+.event.bad { color: var(--bad); }
+.work { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+.work summary { cursor: pointer; }
+.steps { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13px; }
+.steps li { display: flex; gap: 8px; padding: 1px 0; }
+.steps .mark { width: 14px; flex: none; text-align: center; }
+.steps .done .mark { color: var(--ok); }
+.steps .failed .mark { color: var(--bad); }
+.steps .running .mark { color: var(--accent); }
+.steps code { font-size: 12px; overflow-wrap: anywhere; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+.live-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+
+.fixcard { border-color: var(--accent); }
+.fixcard h3 { font-size: 14px; margin: 0; }
+.fixcard details.repo { margin-top: 10px; }
+.fixcard details.repo summary { cursor: pointer; font-size: 13px; }
+.diff { font: 12px/1.45 ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 0; overflow-x: auto; white-space: pre; margin-top: 6px; }
 .diff span { display: block; padding: 0 12px; }
 .diff .add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .diff .del { background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .diff .hunk { color: var(--accent); }
 .diff .file { font-weight: 600; }
-h2.section { font-size: 16px; margin: 0 0 8px; }
-.live { border-color: var(--accent); }
-.live .head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
-.live .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 8px; animation: pulse 1.2s ease-in-out infinite; }
-@keyframes pulse { 50% { opacity: 0.25; } }
-@media (prefers-reduced-motion: reduce) { .live .dot { animation: none; } }
-.steps { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; }
-.steps li { display: flex; gap: 8px; padding: 2px 0; }
-.steps .mark { width: 14px; flex: none; text-align: center; color: var(--muted); }
-.steps .done .mark { color: var(--ok); }
-.steps .failed .mark { color: var(--bad); }
-.steps .running .mark { color: var(--accent); }
-.steps code { font-size: 12px; overflow-wrap: anywhere; }
-.writing { margin-top: 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: hidden; }
-.targets { display: flex; gap: 16px; flex-wrap: wrap; }
-.targets label { display: flex; gap: 6px; align-items: center; }
-.report { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; }
-table { border-collapse: collapse; font-size: 14px; }
-td { padding: 2px 12px 2px 0; }
-form { display: inline; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+.composer { position: sticky; bottom: 0; background: linear-gradient(transparent, var(--bg) 18px); padding: 18px 0 16px; }
+.composer form { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; min-height: 48px; max-height: 40vh; }
+textarea, input[type=text] { font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+textarea { resize: vertical; }
+form.stack { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+form { margin: 0; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 button, select { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 13px; }
+details.triage-fix summary { cursor: pointer; }
 img { max-width: 160px; max-height: 160px; border-radius: 6px; margin: 8px 8px 0 0; }
 </style>
 </head>
-<body><main>${body}</main>${pollItem !== undefined ? POLL(pollItem) : ""}</body>
+<body><main>${body}</main>${script}</body>
 </html>`;
 }
 
 const FIX_PILL: Record<string, string> = { working: "fixing", ready: "fix ready", failed: "fix failed", pr_open: "PR open" };
 
-function card(item: Item): string {
+function pills(item: Item): string {
   const t = item.triage;
+  return [
+    t ? `<span class="pill ${esc(t.kind)}">${esc(t.kind.replace("_", " "))}</span>` : "",
+    t ? `<span class="pill">${esc(t.area)}</span>` : "",
+    t && t.platform !== "unknown" ? `<span class="pill">${esc(t.platform)}</span>` : "",
+    `<span class="pill ${esc(item.status)}">${esc(item.status.replace("_", " "))}</span>`,
+    item.fix_status ? `<span class="pill fix-${esc(item.fix_status)}">${FIX_PILL[item.fix_status]}</span>` : "",
+    item.chat_pending ? `<span class="pill investigating">working</span>` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function card(item: Item): string {
   return `<div class="card">
   <div class="row">
     <a href="/item/${item.id}"><strong>#${item.id}</strong> ${esc(item.source === "bluesky" ? `@${item.author}` : "In-app report")}</a>
-    <span>
-      ${t ? `<span class="pill ${esc(t.kind)}">${esc(t.kind)}</span> <span class="pill">${esc(t.area)}</span>${t.platform !== "unknown" ? ` <span class="pill">${esc(t.platform)}</span>` : ""}` : ""}
-      <span class="pill ${esc(item.status)}">${esc(item.status.replace("_", " "))}</span>
-      ${item.fix_status ? `<span class="pill fix-${esc(item.fix_status)}">${FIX_PILL[item.fix_status]}</span>` : ""}
-      ${item.chat_pending ? `<span class="pill investigating">answering</span>` : ""}
-    </span>
+    <span>${pills(item)}</span>
   </div>
   <p class="text">${esc(item.text.slice(0, 280))}${item.text.length > 280 ? "…" : ""}</p>
   <div class="meta">${esc(new Date(item.received_at).toLocaleString("en-US", { timeZone: "UTC" }))} UTC${item.route_reason ? ` · ${esc(item.route_reason)}` : ""}</div>
@@ -179,40 +204,100 @@ function options(choices: Record<string, string>, selected: string | undefined):
     .join("");
 }
 
-const chatting = (item: Item) => Boolean(item.chat_pending);
+// ---------------------------------------------------------------------------
+// The thread
+// ---------------------------------------------------------------------------
 
-function toolLine(part: { tool?: string; state?: { input?: Record<string, unknown>; status?: string } }): string {
-  const input = part.state?.input ?? {};
-  const arg = input.filePath ?? input.pattern ?? input.sql ?? input.table ?? input.path ?? "";
-  const failed = part.state?.status === "error" ? " (refused or failed)" : "";
-  return `<li>${esc(part.tool)} ${esc(String(arg).slice(0, 300))}${failed}</li>`;
+const STEP_MARK = { running: "…", done: "✓", failed: "✗" };
+
+function stepList(steps: Step[]): string {
+  return `<ul class="steps">${steps
+    .map((st) => `<li class="${st.state}"><span class="mark">${STEP_MARK[st.state]}</span><span>${esc(st.label)}${st.detail ? ` <code>${esc(st.detail.slice(0, 200))}</code>` : ""}</span></li>`)
+    .join("")}</ul>`;
 }
 
-/** The conversation after the first exchange, which is the investigation and its report. */
-async function conversation(item: Item): Promise<string> {
+function elapsed(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+/** An agent's turn: its work folded into one line, then what it said. Live while it runs. */
+function agentMessage(view: TurnView, live: boolean, who = "Agent"): string {
+  const shown = view.steps.slice(-25);
+  const work = live
+    ? `<div class="work"><span class="dot"></span> Working · ${elapsed(Date.now() - view.startedAt)}${view.steps.length ? ` · ${view.steps.length} steps` : ""}${view.cost ? ` · $${view.cost.toFixed(4)}` : ""}${shown.length ? stepList(shown) : ""}</div>`
+    : view.steps.length
+      ? `<details class="work"><summary>${esc(summarize(view.steps))}${view.cost ? ` · $${view.cost.toFixed(4)}` : ""}</summary>${stepList(view.steps)}</details>`
+      : "";
+  const body = view.text
+    ? live
+      ? `<div class="live-text">${esc(view.text.slice(-800))}</div>`
+      : `<div class="markdown">${renderReport(view.text)}</div>`
+    : "";
+  if (!work && !body) return "";
+  return `<div class="msg"><div class="who">${esc(who)}</div><div class="bubble">${work}${body}</div></div>`;
+}
+
+const event = (html: string, bad = false) => `<div class="event${bad ? " bad" : ""}">${html}</div>`;
+
+function triageEvent(item: Item): string {
+  const t = item.triage;
+  if (!t) return item.status === "new" ? event("Waiting for triage") : "";
+  const summary = [t.kind.replace("_", " "), t.area, t.platform !== "unknown" ? t.platform : "", `severity ${t.severity.toFixed(1)}`]
+    .filter(Boolean)
+    .join(" · ");
+  // The routing reason only says something new when it is not just the kind again.
+  const reason = item.route_reason && !item.route_reason.startsWith(t.kind) ? ` · ${esc(item.route_reason)}` : "";
+  return event(`Triaged: ${esc(summary)}${reason}
+    <details class="triage-fix"><summary class="meta">correct</summary>
+      <form method="post" action="/item/${item.id}/correct" class="actions" style="justify-content:center;margin-top:6px">
+        <select name="kind">${options(KINDS, t.kind)}</select>
+        <select name="area">${options(AREAS, t.area)}</select>
+        <select name="platform">${options(PLATFORMS, t.platform)}</select>
+        <button>Save</button>
+      </form>
+    </details>`);
+}
+
+function postMessage(item: Item): string {
+  const who = item.source === "bluesky" ? `@${item.author} on Bluesky` : `In-app report by ${item.author}`;
+  return `<div class="msg"><div class="who">${esc(who)} · ${esc(new Date(item.received_at).toLocaleString("en-US", { timeZone: "UTC" }))} UTC · <a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">open</a></div>
+    <div class="bubble"><div class="text" style="margin:0">${esc(item.text)}</div>
+    ${item.images.map((src) => `<a href="${esc(src)}"><img src="${esc(src)}" alt="Attached image"></a>`).join("")}</div></div>`;
+}
+
+/** What a person sent, without the item tag the service adds for the agent's tools. */
+const personText = (text: string) => text.replace(/\n\n\(support item #\d+\)$/, "");
+
+async function conversation(item: Item, live: boolean): Promise<string> {
   if (!item.session_id) return "";
   const messages = await transcript(item.session_id, workspace).catch(() => []);
-  const firstReply = messages.findIndex((m) => m.info.role === "assistant");
-  // Skip the investigation prompt and every assistant message that answered it.
-  const secondUser = messages.findIndex((m, i) => i > firstReply && m.info.role === "user");
-  if (secondUser < 0) return "";
-  return messages
-    .slice(secondUser)
-    .map(({ info, parts }) => {
-      const text = parts
-        .filter((p) => p.type === "text")
-        .map((p) => ("text" in p ? p.text : ""))
-        .join("\n")
-        .trim();
-      const tools = parts.filter((p) => p.type === "tool");
-      if (info.role === "user") {
-        return `<div class="turn"><div class="who">You</div><p class="text" style="margin:0">${esc(text)}</p></div>`;
-      }
-      return `<div class="turn"><div class="who">Agent</div>
-        ${tools.length ? `<details class="tools"><summary>${tools.length} tool call${tools.length === 1 ? "" : "s"}</summary><ul>${tools.map((t) => toolLine(t as never)).join("")}</ul></details>` : ""}
-        ${text ? `<div class="markdown">${renderReport(text)}</div>` : ""}</div>`;
-    })
-    .join("");
+  const out: string[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const { info, parts } = messages[i];
+    if (info.role !== "user") continue;
+    let j = i + 1;
+    while (j < messages.length && messages[j].info.role === "assistant") j++;
+    const view = viewTurn(messages.slice(i + 1, j), workspace, info.time.created);
+    const isLast = j >= messages.length;
+    const text = parts
+      .filter((p) => p.type === "text")
+      .map((p) => ("text" in p ? p.text : ""))
+      .join("\n");
+
+    if (i === 0) {
+      const added = text.split("\n\nThe maintainer adds:\n\n")[1];
+      if (added) out.push(`<div class="msg mine"><div class="who">You</div><div class="bubble">${esc(personText(added))}</div></div>`);
+      out.push(event("Investigation"));
+    } else if (text.startsWith(EVENT)) {
+      out.push(event(esc(text.slice(EVENT.length).split("\n\n")[0])));
+    } else {
+      out.push(`<div class="msg mine"><div class="who">You</div><div class="bubble">${esc(personText(text))}</div></div>`);
+    }
+    out.push(agentMessage(view, live && isLast && !view.ended));
+    i = j - 1;
+  }
+  return out.join("");
 }
 
 function renderDiff(diff: string): string {
@@ -231,197 +316,109 @@ function renderDiff(diff: string): string {
   return `<div class="diff">${lines.join("")}</div>`;
 }
 
-/** The agent job running on an item, if any: which session, where, and how to say it. */
-function runningJob(item: Item): { sessionId: string; directory: string; label: string } | undefined {
-  if (item.fix_status === "working" && item.fix_session_id) {
-    return { sessionId: item.fix_session_id, directory: fixRoot(item), label: `Working on a fix in ${fixRepos(item).join(", ")}` };
+/** The fix, as the latest thing in the thread: live while it runs, then the diff and the approval. */
+async function fixCard(item: Item): Promise<string> {
+  if (!item.fix_status) return "";
+  const where = esc(fixRepos(item).join(", "));
+
+  if (item.fix_status === "working") {
+    if (!item.fix_session_id) return event(`<span class="dot"></span> Preparing checkouts of ${where} for the fix`);
+    const messages = await transcript(item.fix_session_id, fixRoot(item)).catch(() => []);
+    const lastUser = messages.map((m) => m.info.role).lastIndexOf("user");
+    const view = viewTurn(messages.slice(lastUser + 1), fixRoot(item), messages[lastUser]?.info.time.created ?? Date.now());
+    return agentMessage(view, true, `Fix agent · ${fixRepos(item).join(", ")}`);
   }
-  if (item.fix_status === "working") return { sessionId: "", directory: "", label: "Preparing checkouts for the fix" };
-  if (chatting(item) && item.session_id) {
-    return { sessionId: item.session_id, directory: workspace, label: "Answering your question" };
-  }
-  if (item.status === "investigating") {
-    return { sessionId: item.session_id, directory: workspace, label: item.session_id ? "Investigating" : "Refreshing the checkouts" };
-  }
-  return undefined;
-}
-
-const STEP_MARK = { running: "…", done: "✓", failed: "✗" };
-
-function elapsed(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-}
-
-async function activityHtml(item: Item): Promise<string> {
-  const job = runningJob(item);
-  if (!job) return "";
-  const now = job.sessionId ? await activity(job.sessionId, job.directory) : undefined;
-  const steps = now?.steps ?? [];
-  const shown = steps.slice(-25);
-  return `<div class="head">
-      <strong><span class="dot"></span>${esc(job.label)}</strong>
-      <span class="meta">${now ? `${elapsed(Date.now() - now.startedAt)} · ${steps.length} step${steps.length === 1 ? "" : "s"}${now.cost ? ` · $${now.cost.toFixed(4)}` : ""}` : "starting"}</span>
-    </div>
-    ${steps.length > shown.length ? `<p class="meta" style="margin:8px 0 0">${steps.length - shown.length} earlier steps not shown</p>` : ""}
-    ${shown.length ? `<ul class="steps">${shown.map((st) => `<li class="${st.state}"><span class="mark">${STEP_MARK[st.state]}</span><span>${esc(st.label)}${st.detail ? ` <code>${esc(st.detail.slice(0, 200))}</code>` : ""}</span></li>`).join("")}</ul>` : `<p class="meta" style="margin:8px 0 0">Waiting for the model's first step.</p>`}
-    ${now?.text ? `<div class="writing">${esc(now.text.slice(-600))}</div>` : ""}`;
-}
-
-/** Clef's read on which repositories a fix needs, asked once per report and kept. */
-async function targetsFor(item: Item): Promise<Record<string, number> | undefined> {
-  if (item.fix_targets) {
-    try {
-      return JSON.parse(item.fix_targets);
-    } catch {}
-  }
-  if (!item.report || !clefConfigured()) return undefined;
-  try {
-    const targets = await fixTargets(item.report, config.repos.map((r) => r.name));
-    update(item.id, { fix_targets: JSON.stringify(targets) });
-    return targets;
-  } catch (err) {
-    console.error("fix targets:", err);
-    return undefined;
-  }
-}
-
-async function fixPanel(item: Item): Promise<string> {
-  if (!item.report) return "";
-  const targets = await targetsFor(item);
-  const picked = new Set(targets ? preselect(targets) : fixRepos(item).length ? fixRepos(item) : ["grain"]);
-  const start = (label: string) => `<form method="post" action="/item/${item.id}/fix" class="stack">
-      <span class="meta">Repositories${targets ? ", preselected by Clef from the report" : ""}</span>
-      <div class="targets">${config.repos
-        .map(
-          (r) =>
-            `<label><input type="checkbox" name="repo" value="${esc(r.name)}"${picked.has(r.name) ? " checked" : ""}> ${esc(r.name)}${targets?.[r.name] !== undefined ? ` <span class="meta">${Math.round(targets[r.name] * 100)}%</span>` : ""}</label>`,
-        )
-        .join("")}</div>
-      <label class="meta" for="instructions">Instructions for the fix agent (optional)</label>
-      <textarea name="instructions" id="instructions" placeholder="For example: go with the second candidate cause, and keep the API unchanged"></textarea>
-      <div class="actions"><button class="primary">${label}</button></div>
-    </form>`;
-
-  if (!item.fix_status) {
-    return `<div class="card"><h2 class="section">Fix</h2>
-      <p class="meta" style="margin:0">The fix agent edits the repositories ticked below, each on a branch of its own. It cannot run commands or see production data. Nothing is pushed until you approve the diff.</p>
-      ${start("Work on a fix")}</div>`;
-  }
-  if (item.fix_status === "working") return "";
-
-  const discard = `<form method="post" action="/item/${item.id}/discard_fix"><button>Discard fix</button></form>`;
   if (item.fix_status === "failed") {
-    return `<div class="card"><h2 class="section" style="color:var(--bad)">Fix failed</h2>
-      <div class="report">${esc(item.fix_error)}</div>${start("Try again")}<div class="actions">${discard}</div></div>`;
+    return `<div class="card fixcard"><h3 style="color:var(--bad)">The fix in ${where} failed</h3>
+      <p class="meta">${esc(item.fix_error)}</p>
+      <form method="post" action="/item/${item.id}/discard_fix"><button>Discard it</button></form></div>`;
   }
 
   const diffs = await fixDiffs(item);
   const urls = prUrls(item);
   const prRepos = diffs.map((d) => d.repo).filter(canOpenPr);
   const patchRepos = diffs.map((d) => d.repo).filter((r) => !canOpenPr(r));
+  const added = (d: { diff: string }) => d.diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).length;
+  const removed = (d: { diff: string }) => d.diff.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).length;
 
-  const prForm = prRepos.length
+  const approval = prRepos.length
     ? `<form method="post" action="/item/${item.id}/pr" class="stack">
-        <label class="meta" for="title">Pull request title</label>
-        <input type="text" name="title" id="title" value="${esc(item.fix_title)}" required>
-        <label class="meta" for="body">Description</label>
-        <textarea name="body" id="body" style="min-height:160px">${esc(item.fix_body)}</textarea>
-        <div class="actions"><button class="primary">${prRepos.every((r) => urls[r]) ? "Push update" : "Open draft pull request"}${prRepos.length > 1 ? `s in ${esc(prRepos.join(" and "))}` : ` in ${esc(prRepos[0])}`}</button></div>
+        <input type="text" name="title" value="${esc(item.fix_title)}" placeholder="Pull request title" required aria-label="Pull request title">
+        <textarea name="body" style="min-height:120px" aria-label="Pull request description">${esc(item.fix_body)}</textarea>
+        <div class="actions">
+          <button class="primary">${prRepos.every((r) => urls[r]) ? "Push update" : "Open draft pull request"}${prRepos.length > 1 ? "s" : ""} in ${esc(prRepos.join(" and "))}</button>
+          ${patchRepos.map((r) => `<a href="/item/${item.id}/fix.patch?repo=${encodeURIComponent(r)}">Download ${esc(r)} patch</a>`).join("")}
+        </div>
       </form>`
-    : "";
-  const patches = patchRepos.length
-    ? `<div class="actions">${patchRepos.map((r) => `<a href="/item/${item.id}/fix.patch?repo=${encodeURIComponent(r)}"><button type="button">Download ${esc(r)} patch</button></a>`).join("")}</div>
-       <p class="meta">${esc(patchRepos.join(", "))} ${patchRepos.length === 1 ? "is" : "are"} not on GitHub, so ${patchRepos.length === 1 ? "its change leaves" : "their changes leave"} as a patch: <code>git apply</code> it in a checkout.</p>`
-    : "";
+    : `<div class="actions" style="margin-top:10px">${patchRepos.map((r) => `<a href="/item/${item.id}/fix.patch?repo=${encodeURIComponent(r)}"><button type="button" class="primary">Download ${esc(r)} patch</button></a>`).join("")}</div>`;
 
-  return `<div class="card"><div class="row"><h2 class="section">Fix in ${esc(fixRepos(item).join(", "))}</h2>
-      <span class="meta"><code>${esc(item.fix_branch)}</code></span></div>
-    ${Object.entries(urls).map(([r, u]) => `<p style="margin:4px 0">Draft pull request in ${esc(r)}: <a href="${esc(u)}">${esc(u)}</a></p>`).join("")}
-    ${item.fix_error ? `<p style="color:var(--bad)">${esc(item.fix_error)}</p>` : ""}
-    ${item.fix_summary ? `<details><summary class="meta">What the agent said</summary><div class="markdown">${renderReport(item.fix_summary)}</div></details>` : ""}
+  return `<div class="card fixcard">
+    <div class="row"><h3>Fix in ${where}</h3><span class="meta"><code>${esc(item.fix_branch)}</code></span></div>
+    ${Object.entries(urls).map(([r, u]) => `<p style="margin:6px 0 0">Draft pull request in ${esc(r)}: <a href="${esc(u)}">${esc(u)}</a></p>`).join("")}
+    ${item.fix_error ? `<p style="color:var(--bad);margin:6px 0 0">${esc(item.fix_error)}</p>` : ""}
     ${
       diffs.length
-        ? diffs.map((d) => `<h3 style="font-size:14px;margin:16px 0 6px">${esc(d.repo)}</h3><pre class="meta" style="margin:0 0 8px;white-space:pre-wrap">${esc(d.stat.trim())}</pre>${renderDiff(d.diff)}`).join("")
-        : `<p class="meta">The agent made no changes.</p>`
+        ? diffs.map((d) => `<details class="repo"><summary><strong>${esc(d.repo)}</strong> <span class="meta">+${added(d)} −${removed(d)}</span></summary><pre class="meta" style="margin:6px 0 0;white-space:pre-wrap">${esc(d.stat.trim())}</pre>${renderDiff(d.diff)}</details>`).join("")
+        : `<p class="meta">The fix agent made no changes.</p>`
     }
-    <form method="post" action="/item/${item.id}/revise" class="stack">
-      <label class="meta" for="request">Ask for changes</label>
-      <textarea name="request" id="request" placeholder="For example: also handle the empty gallery case"></textarea>
-      <div class="actions"><button>Send to the fix agent</button></div>
-    </form>
-    ${prForm}${patches}
-    <div class="actions">${discard}</div>
+    ${diffs.length ? approval : ""}
+    <div class="actions" style="margin-top:8px"><form method="post" action="/item/${item.id}/discard_fix"><button class="link">Discard fix</button></form></div>
   </div>`;
 }
 
+/** Whether an agent is working on the item, so the page should keep refreshing. */
+function busy(item: Item): boolean {
+  return Boolean(item.chat_pending) || item.status === "investigating" || item.fix_status === "working" || item.status === "new";
+}
+
+async function threadHtml(item: Item): Promise<string> {
+  const live = Boolean(item.chat_pending) || item.status === "investigating";
+  const waiting =
+    item.status === "investigate"
+      ? event("Queued for investigation")
+      : item.status === "investigating" && !item.session_id
+        ? event(`<span class="dot"></span> Refreshing the checkouts`)
+        : "";
+  return [
+    postMessage(item),
+    triageEvent(item),
+    await conversation(item, live),
+    waiting,
+    item.chat_error ? event(esc(item.chat_error), true) : "",
+    item.error && item.status === "failed" ? event(esc(item.error), true) : "",
+    await fixCard(item),
+  ].join("");
+}
+
 async function detail(item: Item): Promise<string> {
-  const t = item.triage;
-  const triage = t
-    ? `<table>
-        <tr><td class="meta">About grain</td><td>${(t.relevant * 100).toFixed(0)}%</td></tr>
-        <tr><td class="meta">Kind</td><td>${esc(t.kind)} (${(t.kindConfidence * 100).toFixed(0)}% confident)</td></tr>
-        <tr><td class="meta">Area</td><td>${esc(t.area)}</td></tr>
-        <tr><td class="meta">Platform</td><td>${esc(t.platform)}</td></tr>
-        <tr><td class="meta">Severity</td><td>${t.severity.toFixed(1)} of 3</td></tr>
-        <tr><td class="meta">Expects a reply</td><td>${(t.needsReply * 100).toFixed(0)}%</td></tr>
-      </table>
-      <form method="post" action="/item/${item.id}/correct" class="actions">
-        <select name="kind">${options(KINDS, t.kind)}</select>
-        <select name="area">${options(AREAS, t.area)}</select>
-        <select name="platform">${options(PLATFORMS, t.platform)}</select>
-        <button>Correct triage</button>
-      </form>`
-    : `<p class="meta">Not triaged yet.</p>`;
-
-  const action = (name: string, label: string, primary = false) =>
-    `<form method="post" action="/item/${item.id}/${name}"><button${primary ? ' class="primary"' : ""}>${label}</button></form>`;
-
-  const busy = Boolean(runningJob(item));
-  const chatError = item.chat_error;
-  const followUpForm = item.report
-    ? `<form method="post" action="/item/${item.id}/chat" class="stack">
-        <label class="meta" for="message">Ask a follow-up</label>
-        <textarea name="message" id="message" placeholder="For example: does this also affect iOS? How many users hit it this week?"${chatting(item) ? " disabled" : ""}></textarea>
-        <div class="actions"><button${chatting(item) ? " disabled" : ""}>${chatting(item) ? "The agent is answering" : "Ask"}</button></div>
-      </form>`
-    : "";
-
+  const action = (name: string, label: string) =>
+    `<form method="post" action="/item/${item.id}/${name}"><button>${label}</button></form>`;
+  const placeholder = item.session_id
+    ? "Message the agent. Ask about the problem, ask it to fix it, or to change the fix."
+    : "Message the agent. It investigates first, then answers.";
   return page(
     `#${item.id} grain support`,
-    `<p><a href="/">Back to the queue</a></p>
-<div class="card">
-  <div class="row">
-    <strong>#${item.id} ${esc(item.source === "bluesky" ? `@${item.author}` : `Report by ${item.author}`)}</strong>
-    <span class="pill ${esc(item.status)}">${esc(item.status.replace("_", " "))}</span>
-  </div>
-  <p class="text">${esc(item.text)}</p>
-  ${item.images.map((src) => `<a href="${esc(src)}"><img src="${esc(src)}" alt="Attached image"></a>`).join("")}
-  <div class="meta"><a href="${esc(item.url)}">${esc(item.url)}</a></div>
+    `<div class="row"><a href="/">Back to the queue</a>
   <div class="actions">
-    ${item.status !== "investigating" ? action("investigate", item.report ? "Investigate again" : "Investigate", !item.report) : ""}
+    ${!item.session_id && item.status !== "investigating" && item.status !== "investigate" ? action("investigate", "Investigate") : ""}
     ${item.status !== "done" ? action("done", "Mark done") : ""}
     ${item.status !== "dismissed" ? action("dismiss", "Dismiss") : ""}
-  </div>
-</div>
-<div class="card"><h2 class="section">Triage</h2>${triage}
-  ${item.route_reason ? `<p class="meta">Routed: ${esc(item.route_reason)}</p>` : ""}</div>
-${item.error ? `<div class="card"><h2 class="section" style="color:var(--bad)">Error</h2><div class="report">${esc(item.error)}</div></div>` : ""}
-${
-  item.report || item.status === "investigating"
-    ? `<div class="card"><div class="row"><h2 class="section">Investigation</h2>
-        <span class="meta">${item.cost ? `$${item.cost.toFixed(4)} so far` : ""}</span></div>
-        ${item.report ? `<div class="markdown">${renderReport(item.report)}</div>` : ""}
-        ${await conversation(item)}
-        ${chatError ? `<p style="color:var(--bad)">${esc(chatError)}</p>` : ""}
-        ${followUpForm}</div>`
-    : ""
-}
-${busy ? `<div class="card live" id="activity">${await activityHtml(item)}</div>` : ""}
-${await fixPanel(item)}`,
-    busy ? item.id : undefined,
+  </div></div>
+<div class="row" style="margin-top:12px"><h1 style="margin:0">#${item.id}</h1><span id="status">${pills(item)}${item.cost ? ` <span class="meta">$${item.cost.toFixed(4)}</span>` : ""}</span></div>
+<div class="thread" id="thread">${await threadHtml(item)}</div>
+<div class="composer">
+  <form method="post" action="/item/${item.id}/say">
+    <textarea name="message" id="message" placeholder="${esc(placeholder)}" required aria-label="Message the agent"></textarea>
+    <button class="primary">Send</button>
+  </form>
+</div>`,
+    SCRIPT(item.id, busy(item)),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
 
 async function form(req: IncomingMessage): Promise<URLSearchParams> {
   let body = "";
@@ -464,9 +461,15 @@ export function startWeb(port: number, onInvestigate: () => void): void {
       if (!match || !item) return send(res, 404, page("Not found", "<p>Not found.</p>"));
 
       if (req.method === "GET" && !match[2]) return send(res, 200, await detail(item));
-      if (req.method === "GET" && match[2] === "activity") {
+      if (req.method === "GET" && match[2] === "thread") {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ busy: Boolean(runningJob(item)), html: await activityHtml(item) }));
+        return res.end(
+          JSON.stringify({
+            busy: busy(item),
+            html: await threadHtml(item),
+            status: `${pills(item)}${item.cost ? ` <span class="meta">$${item.cost.toFixed(4)}</span>` : ""}`,
+          }),
+        );
       }
       if (req.method === "GET" && match[2] === "fix.patch") {
         const repo = url.searchParams.get("repo") ?? "";
@@ -481,6 +484,12 @@ export function startWeb(port: number, onInvestigate: () => void): void {
       if (req.method !== "POST" || !sameOrigin(req)) return send(res, 403, page("Refused", "<p>Refused.</p>"));
 
       switch (match[2]) {
+        case "say": {
+          const message = (await form(req)).get("message")?.trim();
+          if (!message || item.status === "investigate") break;
+          say(item, message).catch(console.error);
+          break;
+        }
         case "investigate":
           update(item.id, { status: "investigate", error: "" });
           onInvestigate();
@@ -505,35 +514,12 @@ export function startWeb(port: number, onInvestigate: () => void): void {
           update(item.id, { triage });
           break;
         }
-        case "chat": {
-          const message = (await form(req)).get("message")?.trim();
-          if (!message || chatting(item) || !item.session_id) break;
-          // Marks the item as answering before its first await, so the page
-          // this redirects to already shows it.
-          followUp(item, message).catch(console.error);
-          break;
-        }
-        case "fix": {
-          if (item.fix_status === "working" || !item.report) break;
-          const fields = await form(req);
-          const repos = fields.getAll("repo");
-          if (!repos.length) return send(res, 400, page("Pick a repository", `<p>Tick at least one repository for the fix.</p><p><a href="/item/${item.id}">Back</a></p>`));
-          startFix(item, repos, fields.get("instructions") ?? "").catch(console.error);
-          break;
-        }
-        case "revise": {
-          const request = (await form(req)).get("request")?.trim();
-          if (!request || item.fix_status === "working") break;
-          reviseFix(item, request).catch(console.error);
-          break;
-        }
         case "pr": {
           const fields = await form(req);
           try {
             await openPrs(item, fields.get("title") ?? "", fields.get("body") ?? "");
           } catch (err) {
             update(item.id, { fix_error: err instanceof Error ? err.message : String(err) });
-            return send(res, 502, page("Pull request failed", `<p>${esc(err instanceof Error ? err.message : err)}</p><p><a href="/item/${item.id}">Back</a></p>`));
           }
           break;
         }

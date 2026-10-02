@@ -22,26 +22,33 @@ in-app reports ───┘                         ├─ triaged (praise, ques
   model (GLM 5.3 by default). It works in one workspace holding
   checkouts of grain, grain-ios and grain-android, and writes a root-cause
   report.
-- **Follow-up.** Ask the investigation agent more questions on the item's
-  page; it answers in the same session, with the same read-only tools.
-- **Fixes.** "Work on a fix" hands the report and your instructions to a
-  second agent that edits one repository on an `agent/<item>-<slug>` branch.
-  You read the diff, ask for changes, and when it is right, open a draft pull
-  request as the grain-support-agent GitHub App. grain-android is on tangled,
-  so its fixes download as a patch instead.
-- **Dashboard** on port 8080: the queue, each item's triage, the report, the
-  follow-up conversation and the fix. You can correct a triage call there;
-  corrections are kept in `triage_feedback` as labeled data.
+- **Conversation.** Each item's page is a thread with its agent: the post,
+  the triage, the investigation, then you and the agent talking. Ask it
+  questions, tell it to fix the problem, ask for changes. It acts through a
+  few tools (`src/support-mcp.ts`): start a fix, revise it, read its diff,
+  and propose a pull request. When a fix finishes, the service tells the
+  agent, and it reports back in the thread.
+- **Fixes** run in a second agent that edits a worktree of each repository
+  the fix needs, all on one `agent/<item>-<slug>` branch. Clef picks the
+  repositories from the report unless the agent names them. Each changed
+  repository on GitHub becomes a draft pull request as the
+  grain-support-agent GitHub App, once you press the button on the proposal;
+  grain-android, on tangled, downloads as a patch.
+- **Restarts** do not lose work: investigations, conversation turns and
+  fixes pick up where they stopped.
 
 ## The safety model
 
 There are two agents (see `src/opencode.ts`), split by what they could leak.
 
-**investigate** reads text written by strangers. Its tools are read, grep
-and glob within the workspace, and read-only SQL on the appview's database.
-No shell, no edits, no web, no subagents. A prompt injection in a post can
-steer what it reads, but no tool sends anything anywhere, so the worst it can
-do is write a wrong report.
+**investigate** is the agent you talk to, and it reads text written by
+strangers. Its tools are read, grep and glob within the workspace, read-only
+SQL on the appview's database, and the support tools. No shell, no edits, no
+web, no subagents. Nothing it can do sends anything anywhere by itself: a
+fix goes public only when you approve its pull request. Starting or revising
+a fix is refused unless you started the turn, so a post cannot set one
+going, and the agent cannot keep revising its own work after a fix-finished
+event.
 
 **fix** produces something public, a pull request, so it never touches prod
 data: no SQL tool. It can read and edit files in one repository's fix

@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { config } from "./config.ts";
 import { botIdentity, githubRepo, openDraftPr, repoToken } from "./github.ts";
 import { newSession, prompt as ask, resume } from "./opencode.ts";
-import { addCost, update, type Item } from "./store.ts";
+import { addCost, get, update, type Item } from "./store.ts";
 import { git, refreshWorkspace, repoDir } from "./workspace.ts";
 
 // Working on a fix. The `fix` agent works in a directory holding a git worktree
@@ -13,6 +13,18 @@ import { git, refreshWorkspace, repoDir } from "./workspace.ts";
 // pushes its branch and opens a draft pull request.
 
 const fixesDir = resolve(config.stateDir, "fixes");
+
+let settled: (item: Item) => void = () => {};
+
+/** Called with the item each time a fix run ends, ready or failed. */
+export function onFixSettled(listener: (item: Item) => void): void {
+  settled = listener;
+}
+
+function announce(itemId: number): void {
+  const item = get(itemId);
+  if (item) settled(item);
+}
 
 /** The fix's directory. Not a git repository itself, so the agent can reach every worktree in it and nothing above. */
 export function fixRoot(item: Item): string {
@@ -108,6 +120,7 @@ async function runFixAgent(item: Item, run: () => Promise<{ text: string; cost: 
   } catch (err) {
     update(item.id, { fix_status: "failed", fix_error: err instanceof Error ? err.message : String(err) });
   }
+  announce(item.id);
 }
 
 /** Starts a fix from scratch in `repos`, replacing any earlier fix on this item. */
@@ -142,6 +155,7 @@ export async function startFix(item: Item, repos: string[], instructions: string
     await runFixAgent(item, () => ask(sessionId, fixRoot(item), "fix", fixPrompt(item, repos, instructions)));
   } catch (err) {
     update(item.id, { fix_status: "failed", fix_error: err instanceof Error ? err.message : String(err) });
+    announce(item.id);
   }
 }
 

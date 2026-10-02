@@ -1,7 +1,10 @@
 import { config, hasOpenRouter } from "./config.ts";
 import { pollBluesky } from "./bluesky.ts";
+import { resumeTurn, serial } from "./conversation.ts";
 import { resumeFix } from "./fix.ts";
-import { investigate, resumeFollowUp, resumeInvestigation } from "./investigate.ts";
+import { investigate, resumeInvestigation } from "./investigate.ts";
+import { startSupportMcp } from "./support-mcp.ts";
+import { during } from "./turns.ts";
 import { pollReports } from "./reports.ts";
 import { addCost, interrupted, investigationsToday, next, update, type Item } from "./store.ts";
 import { clefConfigured as clefReady, route, triage } from "./triage.ts";
@@ -55,7 +58,9 @@ const wakeInvestigator = worker("investigate", 60_000, async () => {
   // opens must not mistake it for this run.
   update(item.id, { status: "investigating", investigated_at: new Date().toISOString(), error: "", report: "", session_id: "" });
   console.log(`investigate: #${item.id}`);
-  await finishInvestigation(item, investigate(item, (session_id) => update(item.id, { session_id })));
+  await serial(item.id, () =>
+    finishInvestigation(item, during(item.id, "investigation", () => investigate(item, (session_id) => update(item.id, { session_id })))),
+  );
   return true;
 });
 
@@ -74,11 +79,11 @@ function resumeInterrupted(): void {
   const { investigations, chats, fixes } = interrupted();
   for (const item of investigations) {
     console.log(`resume: investigation #${item.id}`);
-    finishInvestigation(item, resumeInvestigation(item));
+    serial(item.id, () => finishInvestigation(item, during(item.id, "investigation", () => resumeInvestigation(item))));
   }
   for (const item of chats) {
-    console.log(`resume: follow-up on #${item.id}`);
-    resumeFollowUp(item).catch((err) => console.error("resume follow-up:", errorText(err)));
+    console.log(`resume: conversation on #${item.id}`);
+    resumeTurn(item);
   }
   for (const item of fixes) {
     console.log(`resume: fix on #${item.id}`);
@@ -104,6 +109,7 @@ const wakeTriage = worker("triage", 30_000, async () => {
   return true;
 });
 
+startSupportMcp();
 resumeInterrupted();
 startWeb(config.port, wakeInvestigator);
 
