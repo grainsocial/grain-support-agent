@@ -63,6 +63,8 @@ export interface Item {
   /** A follow-up question the investigation agent is answering. Empty when none is. */
   chat_pending: string;
   chat_error: string;
+  /** JSON: the fix's before and after screenshots, see screenshots.ts. */
+  fix_shots: string;
 }
 
 // A fix, at most one per item:
@@ -139,6 +141,7 @@ const LATER_COLUMNS: Record<string, string> = {
   fix_instructions: "TEXT NOT NULL DEFAULT ''",
   chat_pending: "TEXT NOT NULL DEFAULT ''",
   chat_error: "TEXT NOT NULL DEFAULT ''",
+  fix_shots: "TEXT NOT NULL DEFAULT ''",
 };
 const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
 for (const [column, type] of Object.entries(LATER_COLUMNS)) {
@@ -276,7 +279,7 @@ export function addCost(id: number, cost: number): void {
  * just goes back on the queue; anything with a session is returned so it can
  * be picked up where it stopped.
  */
-export function interrupted(): { investigations: Item[]; chats: Item[]; fixes: Item[] } {
+export function interrupted(): { investigations: Item[]; chats: Item[]; fixes: Item[]; screenshots: Item[] } {
   db.prepare(
     `UPDATE items SET status = 'investigate', updated_at = ? WHERE status = 'investigating' AND session_id = ''`,
   ).run(now());
@@ -285,5 +288,6 @@ export function interrupted(): { investigations: Item[]; chats: Item[]; fixes: I
     investigations: rows(`status = 'investigating'`),
     chats: rows(`chat_pending != ''`),
     fixes: rows(`fix_status = 'working'`),
+    screenshots: rows(`fix_status != 'working' AND fix_shots LIKE '{"status":"running"%'`),
   };
 }

@@ -1,0 +1,8 @@
+{
+  "name": "preview-pds",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@atproto/pds": "0.5.36"
+  }
+}

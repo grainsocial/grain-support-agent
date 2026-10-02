@@ -3,6 +3,7 @@ import { pollBluesky } from "./bluesky.ts";
 import { resumeTurn, serial } from "./conversation.ts";
 import { resumeFix } from "./fix.ts";
 import { investigate, resumeInvestigation } from "./investigate.ts";
+import { screenshotFixes, takeScreenshots } from "./screenshots.ts";
 import { startSupportMcp } from "./support-mcp.ts";
 import { during } from "./turns.ts";
 import { pollReports } from "./reports.ts";
@@ -76,7 +77,11 @@ async function finishInvestigation(item: Item, run: Promise<{ report: string; co
 
 /** Picks up whatever a restart cut off, each from where it stopped. */
 function resumeInterrupted(): void {
-  const { investigations, chats, fixes } = interrupted();
+  const { investigations, chats, fixes, screenshots } = interrupted();
+  for (const item of screenshots) {
+    console.log(`resume: screenshots for #${item.id}`);
+    takeScreenshots(item).catch((err) => console.error("resume screenshots:", errorText(err)));
+  }
   for (const item of investigations) {
     console.log(`resume: investigation #${item.id}`);
     serial(item.id, () => finishInvestigation(item, during(item.id, "investigation", () => resumeInvestigation(item))));
@@ -110,6 +115,7 @@ const wakeTriage = worker("triage", 30_000, async () => {
 });
 
 startSupportMcp();
+screenshotFixes();
 resumeInterrupted();
 startWeb(config.port, wakeInvestigator);
 

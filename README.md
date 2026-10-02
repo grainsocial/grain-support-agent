@@ -112,3 +112,23 @@ this repository. Everything is in `stacks/grain` in hetzner-infra:
    config with `scripts/push-config.sh`.
 3. Point `agent.grain.social` at the host in Cloudflare.
 4. `grain-deploy` on the host builds and starts it.
+
+## Screenshots
+
+`preview/` is a second image: a runner that photographs grain's web app with
+a fix applied. For each run it starts its own dev stack in one container,
+[plc-sqlite](https://tangled.org/chadtmiller.com/plc-sqlite), the reference
+PDS, and grain's dev server, which seeds alice.test and friends. Then it
+photographs the pages the fix agent listed, once on the commit the fix
+started from and once with the fix's patch applied, and throws the stack
+away. node_modules are cached by lockfile hash; a run takes about half a
+minute once they are.
+
+It runs code an agent wrote, so it holds no secrets and mounts nothing but
+its cache, and it shares a network only with this service. The dashboard
+refuses any request without the key Caddy adds, so the runner cannot reach
+it either.
+
+Screenshots are served at `/shots/<token>/`, the one path Caddy leaves
+outside basic auth, so a pull request can show them; the token is the only
+key. They show seed data, never production data.

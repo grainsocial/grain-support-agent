@@ -74,3 +74,7 @@ export async function openDraftPr(
   });
   return created.html_url;
 }
+
+export async function updatePrBody(repo: string, token: string, number: number, body: string): Promise<void> {
+  await api(`/repos/${repo}/pulls/${number}`, `token ${token}`, { method: "PATCH", body: JSON.stringify({ body }) });
+}

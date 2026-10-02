@@ -1,8 +1,13 @@
+import { timingSafeEqual } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import MarkdownIt from "markdown-it";
 import { summarize, viewTurn, type Step, type TurnView } from "./activity.ts";
 import { EVENT, say } from "./conversation.ts";
+import { config } from "./config.ts";
 import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls } from "./fix.ts";
+import { shotsDir, shotsOf } from "./screenshots.ts";
 import { transcript } from "./opencode.ts";
 import { counts, get, list, recordFeedback, update, VIEWS, type Item, type View } from "./store.ts";
 import { AREAS, KINDS, PLATFORMS } from "./triage.ts";
@@ -316,6 +321,26 @@ function renderDiff(diff: string): string {
   return `<div class="diff">${lines.join("")}</div>`;
 }
 
+function screenshotBlock(item: Item): string {
+  const shots = shotsOf(item);
+  if (!shots) return "";
+  if (shots.status === "running") return `<p class="meta" style="margin:10px 0 0"><span class="dot"></span> Taking before and after screenshots of ${shots.pages.length} page${shots.pages.length === 1 ? "" : "s"}</p>`;
+  if (shots.status === "failed") {
+    return `<details class="repo"><summary style="color:var(--bad)">Screenshots failed: ${esc(shots.error ?? "")}</summary><pre class="meta" style="white-space:pre-wrap;max-height:300px;overflow:auto">${esc(shots.log ?? "")}</pre></details>`;
+  }
+  const img = (file: string, ok: boolean) => (ok ? `<a href="/shots/${esc(shots.token)}/${esc(file)}" target="_blank"><img src="/shots/${esc(shots.token)}/${esc(file)}" alt="" style="max-width:100%;max-height:none;margin:0;border:1px solid var(--border)"></a>` : `<p class="meta">not taken</p>`);
+  return `<details class="repo" open><summary><strong>Screenshots</strong> <span class="meta">before and after, on seed data</span></summary>
+    ${shots.pages
+      .map(
+        (p) => `<p class="meta" style="margin:10px 0 4px"><code>${esc(p.path)}</code> ${esc(p.viewport)}${p.device === "default" ? "" : `, ${esc(p.device)}`}</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:${p.viewport === "mobile" ? "560px" : "100%"}">
+        <div><div class="meta">Before</div>${img(`${p.name}-before.png`, p.before)}</div>
+        <div><div class="meta">After</div>${img(`${p.name}-after.png`, p.after)}</div>
+      </div>`,
+      )
+      .join("")}</details>`;
+}
+
 /** The fix, as the latest thing in the thread: live while it runs, then the diff and the approval. */
 async function fixCard(item: Item): Promise<string> {
   if (!item.fix_status) return "";
@@ -361,6 +386,7 @@ async function fixCard(item: Item): Promise<string> {
         ? diffs.map((d) => `<details class="repo"><summary><strong>${esc(d.repo)}</strong> <span class="meta">+${added(d)} −${removed(d)}</span></summary><pre class="meta" style="margin:6px 0 0;white-space:pre-wrap">${esc(d.stat.trim())}</pre>${renderDiff(d.diff)}</details>`).join("")
         : `<p class="meta">The fix agent made no changes.</p>`
     }
+    ${screenshotBlock(item)}
     ${diffs.length ? approval : ""}
     <div class="actions" style="margin-top:8px"><form method="post" action="/item/${item.id}/discard_fix"><button class="link">Discard fix</button></form></div>
   </div>`;
@@ -368,7 +394,13 @@ async function fixCard(item: Item): Promise<string> {
 
 /** Whether an agent is working on the item, so the page should keep refreshing. */
 function busy(item: Item): boolean {
-  return Boolean(item.chat_pending) || item.status === "investigating" || item.fix_status === "working" || item.status === "new";
+  return (
+    Boolean(item.chat_pending) ||
+    item.status === "investigating" ||
+    item.fix_status === "working" ||
+    item.status === "new" ||
+    shotsOf(item)?.status === "running"
+  );
 }
 
 async function threadHtml(item: Item): Promise<string> {
@@ -429,6 +461,14 @@ async function form(req: IncomingMessage): Promise<URLSearchParams> {
   return new URLSearchParams(body);
 }
 
+/** Whether the request came through Caddy, which adds the dashboard key. */
+function fromCaddy(req: IncomingMessage): boolean {
+  if (!config.dashboardKey) return true;
+  const sent = Buffer.from(String(req.headers["x-dashboard-key"] ?? ""));
+  const key = Buffer.from(config.dashboardKey);
+  return sent.length === key.length && timingSafeEqual(sent, key);
+}
+
 // Basic auth is something the browser sends with any request to this origin,
 // including a form posted from another site. Refuse cross-site writes.
 function sameOrigin(req: IncomingMessage): boolean {
@@ -454,6 +494,16 @@ export function startWeb(port: number, onInvestigate: () => void): void {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (url.pathname === "/_health") return send(res, 200, "ok");
+      if (!fromCaddy(req)) return send(res, 403, "Refused.");
+      // Screenshots are public, so a pull request can show them; Caddy leaves
+      // this path outside basic auth. The token in the path is the only key.
+      const shot = url.pathname.match(/^\/shots\/([\w-]{16,64})\/([\w-]{1,80}\.png)$/);
+      if (req.method === "GET" && shot) {
+        const file = join(shotsDir, shot[1], shot[2]);
+        if (!existsSync(file)) return send(res, 404, "not found");
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=31536000, immutable" });
+        return void createReadStream(file).pipe(res);
+      }
       if (req.method === "GET" && url.pathname === "/") return send(res, 200, dashboard(url.searchParams.get("view") ?? "inbox"));
 
       const match = url.pathname.match(/^\/item\/(\d+)(?:\/([\w.]+))?$/);

@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { config } from "./config.ts";
-import { botIdentity, githubRepo, openDraftPr, repoToken } from "./github.ts";
+import { botIdentity, githubRepo, openDraftPr, repoToken, updatePrBody } from "./github.ts";
+import { prSection } from "./screenshots.ts";
 import { newSession, prompt as ask, resume } from "./opencode.ts";
 import { addCost, get, update, type Item } from "./store.ts";
 import { git, refreshWorkspace, repoDir } from "./workspace.ts";
@@ -14,16 +15,16 @@ import { git, refreshWorkspace, repoDir } from "./workspace.ts";
 
 const fixesDir = resolve(config.stateDir, "fixes");
 
-let settled: (item: Item) => void = () => {};
+const listeners: ((item: Item) => void)[] = [];
 
 /** Called with the item each time a fix run ends, ready or failed. */
 export function onFixSettled(listener: (item: Item) => void): void {
-  settled = listener;
+  listeners.push(listener);
 }
 
 function announce(itemId: number): void {
   const item = get(itemId);
-  if (item) settled(item);
+  if (item) for (const listener of listeners) listener(item);
 }
 
 /** The fix's directory. Not a git repository itself, so the agent can reach every worktree in it and nothing above. */
@@ -90,13 +91,19 @@ ${item.report.replaceAll("</report>", "")}
 
 ${instructions.trim() ? `Instructions from the maintainer, which take priority over the report:\n\n${instructions.trim()}\n\n` : ""}Make the smallest change that fixes the problem, in the style of the code around it. Update or add tests next to the code you change when the repository has them. You cannot run commands, builds or tests, so read the code you touch carefully, and check every call site of anything whose signature you change.
 
-When you are done, reply with exactly these two sections:
+When you are done, reply with these sections:
 
 ## PR title
 One line in conventional commit style, for example "fix(feed): keep the carousel position after a refresh".
 
 ## PR description
-What was wrong, what you changed and why, and how a reviewer can verify it. Do not include handles, DIDs, record URIs, query results or anything else about specific users.`;
+What was wrong, what you changed and why, and how a reviewer can verify it. Do not include handles, DIDs, record URIs, query results or anything else about specific users.
+
+## Screenshots
+Only if you changed what grain's website looks like (grain/app). Up to four pages where the change shows, one per line: the path, then mobile or desktop, then android or ios if the page only shows the change on that kind of phone. For example:
+- / mobile android
+- /profile/alice.test desktop
+They are photographed signed out against seed data: the accounts alice.test, bob.test, carol.test and dave.test, with a few galleries. Leave this section out for changes nobody can see.`;
 }
 
 function parsePr(text: string): { title: string; body: string } {
@@ -142,6 +149,7 @@ export async function startFix(item: Item, repos: string[], instructions: string
     fix_pr_url: "",
     fix_session_id: "",
     fix_instructions: instructions,
+    fix_shots: "",
   });
 
   try {
@@ -181,6 +189,8 @@ function baseBranch(name: string): string {
 
 export interface RepoDiff {
   repo: string;
+  /** The commit the fix's branch started from. */
+  base: string;
   stat: string;
   diff: string;
 }
@@ -200,7 +210,8 @@ export async function fixDiffs(item: Item): Promise<RepoDiff[]> {
       git(["-C", dir, "diff", "--cached", "--stat", against]),
       git(["-C", dir, "diff", "--cached", against], { maxBuffer: 20 * 1024 * 1024 }),
     ]);
-    if (diff.stdout.trim()) out.push({ repo, stat: stat.stdout, diff: diff.stdout });
+    const baseSha = (await git(["-C", dir, "rev-parse", against])).stdout.trim();
+    if (diff.stdout.trim()) out.push({ repo, base: baseSha, stat: stat.stdout, diff: diff.stdout });
   }
   return out;
 }
@@ -211,6 +222,13 @@ export async function fixDiffs(item: Item): Promise<RepoDiff[]> {
  * commit to the one already open. Repositories elsewhere are left for the
  * patch download.
  */
+/** A pull request's description: the agreed text, the sibling note, screenshots for grain, and the footer. */
+export function prBody(item: Item, repo: string, changed: string[], body: string): string {
+  const siblings = changed.length > 1 ? `Part of one change across ${changed.join(" and ")}, on branch \`${item.fix_branch}\` in each.` : "";
+  const shots = repo === "grain" ? prSection(item) : "";
+  return [body.trim(), siblings, shots, "---\nDrafted by grain-support-agent and reviewed before opening."].filter(Boolean).join("\n\n");
+}
+
 export async function openPrs(item: Item, title: string, body: string): Promise<Record<string, string>> {
   if (!title.trim()) throw new Error("a pull request needs a title");
   const changed = (await fixDiffs(item)).map((d) => d.repo).filter(canOpenPr);
@@ -218,7 +236,6 @@ export async function openPrs(item: Item, title: string, body: string): Promise<
 
   const urls = prUrls(item);
   const bot = await botIdentity();
-  const siblings = changed.length > 1 ? `\n\nPart of one change across ${changed.join(" and ")}, on branch \`${item.fix_branch}\` in each.` : "";
   for (const name of changed) {
     const repoConfig = config.repos.find((r) => r.name === name)!;
     const repo = githubRepo(repoConfig.url)!;
@@ -240,13 +257,26 @@ export async function openPrs(item: Item, title: string, body: string): Promise<
       head: item.fix_branch,
       base: repoConfig.branch,
       title: title.trim(),
-      body: `${body.trim()}${siblings}\n\n---\nDrafted by grain-support-agent and reviewed before opening.`,
+      body: prBody(item, name, changed, body),
     });
     // Saved after each repo, so a failure part way keeps the ones that opened.
     update(item.id, { fix_pr_url: JSON.stringify(urls) });
   }
   update(item.id, { fix_status: "pr_open", fix_title: title.trim(), fix_body: body.trim() });
   return urls;
+}
+
+/** Rewrites the open pull requests' descriptions, after screenshots arrive. */
+export async function refreshPrBodies(item: Item): Promise<void> {
+  const urls = prUrls(item);
+  const changed = Object.keys(urls);
+  for (const [name, url] of Object.entries(urls)) {
+    const repoConfig = config.repos.find((r) => r.name === name);
+    const repo = repoConfig && githubRepo(repoConfig.url);
+    const number = Number(url.split("/").pop());
+    if (!repo || !number) continue;
+    await updatePrBody(repo, await repoToken(repo), number, prBody(item, name, changed, item.fix_body));
+  }
 }
 
 export async function discardFix(item: Item): Promise<void> {
@@ -262,5 +292,6 @@ export async function discardFix(item: Item): Promise<void> {
     fix_pr_url: "",
     fix_error: "",
     fix_instructions: "",
+    fix_shots: "",
   });
 }

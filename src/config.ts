@@ -38,6 +38,15 @@ function parseRepos(spec: string): Repo[] {
 
 export const config = {
   port: int("PORT", 8080),
+  // Caddy sends this with every request it forwards, and the dashboard refuses
+  // any request without it. The preview runner shares a network with this
+  // service, and runs code an agent wrote; this keeps it off the dashboard.
+  dashboardKey: secret("DASHBOARD_KEY"),
+  // The dashboard's public address, for screenshot links in pull requests.
+  publicUrl: optional("PUBLIC_URL", "https://agent.grain.social"),
+  // The preview runner that photographs grain with a fix applied. Empty
+  // turns screenshots off.
+  previewUrl: optional("PREVIEW_URL"),
   // The support tools' MCP server, for the opencode server only.
   supportMcpPort: int("SUPPORT_MCP_PORT", 4097),
   stateDir: optional("STATE_DIR", "./state"),
