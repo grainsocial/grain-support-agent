@@ -12,10 +12,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "@opencode-ai/sdk": "1.18.34",
+    "markdown-it": "^14.3.2",
     "opencode-ai": "1.18.34",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^24.19.1",
     "typescript": "^5.9.3"
   }

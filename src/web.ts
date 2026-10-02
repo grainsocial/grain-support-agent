@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import MarkdownIt from "markdown-it";
 import { AREAS, KINDS, PLATFORMS } from "./triage.ts";
 import { counts, get, list, recordFeedback, update, type Item, type Status } from "./store.ts";
 
@@ -13,6 +14,20 @@ const VIEWS: Record<string, { label: string; statuses: Status[] }> = {
   done: { label: "Done", statuses: ["done"] },
   dismissed: { label: "Dismissed", statuses: ["dismissed"] },
 };
+
+// Reports are written by a model that has read untrusted text, so they render
+// with raw HTML off and images disabled: an image URL in a report would be
+// fetched the moment the page opens, which is how a prompt injection would
+// carry data out. Links stay, since nothing follows a link until it is clicked.
+const markdown = new MarkdownIt({ html: false, linkify: true }).disable("image");
+const defaultLink = markdown.renderer.rules.link_open ?? ((tokens, i, opts, _env, self) => self.renderToken(tokens, i, opts));
+markdown.renderer.rules.link_open = (tokens, i, opts, env, self) => {
+  tokens[i].attrSet("rel", "noopener noreferrer nofollow");
+  tokens[i].attrSet("target", "_blank");
+  return defaultLink(tokens, i, opts, env, self);
+};
+
+export const renderReport = (report: string) => markdown.render(report);
 
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -51,6 +66,17 @@ nav a.on { background: var(--surface); color: var(--text); border: 1px solid var
 .pill.bug, .pill.failed { color: var(--bad); border-color: currentColor; }
 .pill.reported, .pill.investigating { color: var(--accent); border-color: currentColor; }
 .pill.needs_review { color: var(--warn); border-color: currentColor; }
+.markdown { overflow-wrap: anywhere; }
+.markdown h1, .markdown h2, .markdown h3 { font-size: 15px; margin: 20px 0 6px; }
+.markdown > :first-child { margin-top: 0; }
+.markdown p, .markdown ul, .markdown ol { margin: 0 0 10px; }
+.markdown ul, .markdown ol { padding-left: 22px; }
+.markdown code { font: 13px ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.markdown pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; }
+.markdown pre code { border: 0; padding: 0; background: none; }
+.markdown table { display: block; overflow-x: auto; margin-bottom: 10px; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.markdown blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .report { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; }
 table { border-collapse: collapse; font-size: 14px; }
 td { padding: 2px 12px 2px 0; }
@@ -148,7 +174,7 @@ ${
   item.report || item.status === "investigating"
     ? `<div class="card"><div class="row"><h2 style="font-size:16px;margin:0 0 8px">Investigation</h2>
         <span class="meta">${item.cost ? `$${item.cost.toFixed(4)}` : ""}${item.session_id ? ` · session ${esc(item.session_id)}` : ""}</span></div>
-        ${item.report ? `<div class="report">${esc(item.report)}</div>` : `<p class="meta">Running. Refresh to check.</p>`}</div>`
+        ${item.report ? `<div class="markdown">${renderReport(item.report)}</div>` : `<p class="meta">Running. Refresh to check.</p>`}</div>`
     : ""
 }`,
   );
