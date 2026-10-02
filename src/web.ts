@@ -5,7 +5,7 @@ import { config } from "./config.ts";
 import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls, reviseFix, startFix } from "./fix.ts";
 import { followUp } from "./investigate.ts";
 import { transcript } from "./opencode.ts";
-import { counts, get, list, recordFeedback, update, type Item, type Status } from "./store.ts";
+import { counts, get, list, recordFeedback, update, VIEWS, type Item, type View } from "./store.ts";
 import { AREAS, clefConfigured, fixTargets, KINDS, PLATFORMS, preselect } from "./triage.ts";
 import { workspace } from "./workspace.ts";
 
@@ -13,13 +13,6 @@ import { workspace } from "./workspace.ts";
 // activity of a running agent. It has no login of its own: Caddy puts basic
 // auth in front of it, and inside the compose network nothing else talks to it.
 
-const VIEWS: Record<string, { label: string; statuses: Status[] }> = {
-  inbox: { label: "Needs you", statuses: ["needs_review", "reported", "failed"] },
-  working: { label: "In progress", statuses: ["new", "investigate", "investigating"] },
-  triaged: { label: "Triaged", statuses: ["triaged"] },
-  done: { label: "Done", statuses: ["done"] },
-  dismissed: { label: "Dismissed", statuses: ["dismissed"] },
-};
 
 // Reports are written by a model that has read untrusted text, so they render
 // with raw HTML off and images disabled: an image URL in a report would be
@@ -88,7 +81,10 @@ nav a.on { background: var(--surface); color: var(--text); border: 1px solid var
 .pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .pill.bug, .pill.failed { color: var(--bad); border-color: currentColor; }
 .pill.reported, .pill.investigating { color: var(--accent); border-color: currentColor; }
-.pill.needs_review { color: var(--warn); border-color: currentColor; }
+.pill.needs_review, .pill.fix-ready { color: var(--warn); border-color: currentColor; }
+.pill.fix-working { color: var(--accent); border-color: currentColor; }
+.pill.fix-failed { color: var(--bad); border-color: currentColor; }
+.pill.fix-pr_open { color: var(--ok); border-color: currentColor; }
 .markdown { overflow-wrap: anywhere; }
 .markdown h1, .markdown h2, .markdown h3 { font-size: 15px; margin: 20px 0 6px; }
 .markdown > :first-child { margin-top: 0; }
@@ -145,6 +141,8 @@ img { max-width: 160px; max-height: 160px; border-radius: 6px; margin: 8px 8px 0
 </html>`;
 }
 
+const FIX_PILL: Record<string, string> = { working: "fixing", ready: "fix ready", failed: "fix failed", pr_open: "PR open" };
+
 function card(item: Item): string {
   const t = item.triage;
   return `<div class="card">
@@ -153,6 +151,8 @@ function card(item: Item): string {
     <span>
       ${t ? `<span class="pill ${esc(t.kind)}">${esc(t.kind)}</span> <span class="pill">${esc(t.area)}</span>${t.platform !== "unknown" ? ` <span class="pill">${esc(t.platform)}</span>` : ""}` : ""}
       <span class="pill ${esc(item.status)}">${esc(item.status.replace("_", " "))}</span>
+      ${item.fix_status ? `<span class="pill fix-${esc(item.fix_status)}">${FIX_PILL[item.fix_status]}</span>` : ""}
+      ${item.chat_pending ? `<span class="pill investigating">answering</span>` : ""}
     </span>
   </div>
   <p class="text">${esc(item.text.slice(0, 280))}${item.text.length > 280 ? "…" : ""}</p>
@@ -160,16 +160,13 @@ function card(item: Item): string {
 </div>`;
 }
 
-function dashboard(view: string): string {
-  const v = VIEWS[view] ?? VIEWS.inbox;
+function dashboard(requested: string): string {
+  const view: View = requested in VIEWS ? (requested as View) : "inbox";
   const n = counts();
-  const tabs = Object.entries(VIEWS)
-    .map(([key, { label, statuses }]) => {
-      const total = statuses.reduce((sum, s) => sum + (n[s] ?? 0), 0);
-      return `<a href="/?view=${key}" class="${v === VIEWS[key] ? "on" : ""}">${label} (${total})</a>`;
-    })
+  const tabs = (Object.keys(VIEWS) as View[])
+    .map((key) => `<a href="/?view=${key}" class="${key === view ? "on" : ""}">${VIEWS[key].label} (${n[key]})</a>`)
     .join("");
-  const items = list(v.statuses);
+  const items = list(view);
   return page(
     "grain support",
     `<h1>grain support</h1><nav>${tabs}</nav>${items.length ? items.map(card).join("") : `<p class="meta">Nothing here.</p>`}`,

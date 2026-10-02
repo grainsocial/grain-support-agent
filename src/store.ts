@@ -190,18 +190,32 @@ export function get(id: number): Item | undefined {
   return row ? hydrate(row) : undefined;
 }
 
-export function list(statuses: Status[], limit = 200): Item[] {
-  const marks = statuses.map(() => "?").join(",");
-  return db
-    .prepare(`SELECT * FROM items WHERE status IN (${marks}) ORDER BY id DESC LIMIT ?`)
-    .all(...statuses, limit)
-    .map(hydrate);
+// The dashboard's tabs. Each item is in exactly one: closed items by their
+// status, then anything an agent is working on, then open pull requests, then
+// whatever waits on a person. Fixed SQL only; nothing here comes from a request.
+const CLOSED = `status IN ('done', 'dismissed')`;
+const WORKING = `(status IN ('new', 'investigate', 'investigating') OR fix_status = 'working' OR chat_pending != '')`;
+const PR_OPEN = `fix_status = 'pr_open'`;
+
+export const VIEWS = {
+  inbox: { label: "Needs you", where: `NOT ${CLOSED} AND NOT ${WORKING} AND NOT ${PR_OPEN} AND status IN ('needs_review', 'reported', 'failed')` },
+  working: { label: "In progress", where: `NOT ${CLOSED} AND ${WORKING}` },
+  pr: { label: "PR open", where: `NOT ${CLOSED} AND NOT ${WORKING} AND ${PR_OPEN}` },
+  triaged: { label: "Triaged", where: `status = 'triaged' AND NOT ${WORKING} AND NOT ${PR_OPEN}` },
+  done: { label: "Done", where: `status = 'done'` },
+  dismissed: { label: "Dismissed", where: `status = 'dismissed'` },
+} as const;
+
+export type View = keyof typeof VIEWS;
+
+export function list(view: View, limit = 200): Item[] {
+  return db.prepare(`SELECT * FROM items WHERE ${VIEWS[view].where} ORDER BY id DESC LIMIT ?`).all(limit).map(hydrate);
 }
 
-export function counts(): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const row of db.prepare(`SELECT status, COUNT(*) AS n FROM items GROUP BY status`).all()) {
-    out[String(row.status)] = Number(row.n);
+export function counts(): Record<View, number> {
+  const out = {} as Record<View, number>;
+  for (const view of Object.keys(VIEWS) as View[]) {
+    out[view] = Number(db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ${VIEWS[view].where}`).get()?.n ?? 0);
   }
   return out;
 }
