@@ -22,28 +22,47 @@ in-app reports ───┘                         ├─ triaged (praise, ques
   model (GLM 5.3 by default). It works in one workspace holding
   checkouts of grain, grain-ios and grain-android, and writes a root-cause
   report.
-- **Dashboard** on port 8080: the queue, each item's triage, and the report.
-  You can correct a triage call there; corrections are kept in
-  `triage_feedback` as labeled data.
+- **Follow-up.** Ask the investigation agent more questions on the item's
+  page; it answers in the same session, with the same read-only tools.
+- **Fixes.** "Work on a fix" hands the report and your instructions to a
+  second agent that edits one repository on an `agent/<item>-<slug>` branch.
+  You read the diff, ask for changes, and when it is right, open a draft pull
+  request as the grain-support-agent GitHub App. grain-android is on tangled,
+  so its fixes download as a patch instead.
+- **Dashboard** on port 8080: the queue, each item's triage, the report, the
+  follow-up conversation and the fix. You can correct a triage call there;
+  corrections are kept in `triage_feedback` as labeled data.
 
 ## The safety model
 
-The investigation agent reads text written by strangers. Its tools are:
-read, grep and glob within the workspace, and read-only SQL on the appview's
-database. Everything else is off: no shell, no edits, no web, no subagents.
+There are two agents (see `src/opencode.ts`), split by what they could leak.
+
+**investigate** reads text written by strangers. Its tools are read, grep
+and glob within the workspace, and read-only SQL on the appview's database.
+No shell, no edits, no web, no subagents. A prompt injection in a post can
+steer what it reads, but no tool sends anything anywhere, so the worst it can
+do is write a wrong report.
+
+**fix** produces something public, a pull request, so it never touches prod
+data: no SQL tool. It can read and edit files in one repository's fix
+checkout, and nothing else; no shell, since a shell could read the process
+environment and reach the network. It starts from the report and your
+instructions, not from the raw post. Its work leaves the server only when you
+press the button, after reading the diff and the PR text.
+
 Secrets other than the OpenRouter key are removed from the environment before
-opencode starts. A prompt injection in a post can steer what the agent reads,
-but no tool sends anything anywhere, so the worst it can do is write a wrong
-report.
+opencode starts. The SQL tool (`src/grain-db-mcp.ts`, guarded by
+`src/grain-db.ts`) opens the database read-only and refuses any statement that
+names a table holding credentials or private state: `_oauth_keys`,
+`_oauth_sessions`, `_push_tokens`, `_preferences`, `_mutes`, `_space_invites`.
+opencode's `external_directory` rule keeps the file tools inside the workspace
+or the fix checkout, so neither agent can read the database file directly.
 
-The SQL tool (`src/grain-db-mcp.ts`, guarded by `src/grain-db.ts`) opens the
-database read-only and refuses any statement that names a table holding
-credentials or private state: `_oauth_keys`, `_oauth_sessions`, `_push_tokens`,
-`_preferences`, `_mutes`, `_space_invites`. opencode's `external_directory`
-rule stops the file tools from reading the database file directly.
+Reports render as markdown with raw HTML off and images disabled: an image
+URL in a report would be fetched as soon as the page opened.
 
-Nothing is posted, opened or changed anywhere. Draft replies and PRs are a
-later step, and both will wait for approval.
+Nothing is posted to Bluesky. Drafted replies are a later step, and will wait
+for approval like pull requests do.
 
 ## Configuration
 
@@ -59,6 +78,7 @@ later step, and both will wait for approval.
 | `BSKY_APP_PASSWORD` | | Without it, mentions are not polled |
 | `GRAIN_DB_PATH` | | The appview's `grain.db`. Without it, no reports and no SQL tool |
 | `REPOS` | grain, grain-ios, grain-android | `name=url#branch`, space separated |
+| `GITHUB_APP_ID`, `GITHUB_APP_KEY` | | The GitHub App fixes become pull requests as; the key is the PEM, base64-encoded. Without them, fixes download as patches |
 | `STATE_DIR` | `./state` | Queue database, opencode sessions, checkouts |
 
 On OpenRouter, restrict routing to providers that neither train on nor retain

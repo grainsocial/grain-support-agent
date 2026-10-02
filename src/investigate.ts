@@ -1,100 +1,14 @@
-import { execFile } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { promisify } from "node:util";
-import { createOpencode, type Config, type OpencodeClient } from "@opencode-ai/sdk";
-import { config, type Repo } from "./config.ts";
+import { newSession, prompt as ask } from "./opencode.ts";
 import type { Item } from "./store.ts";
+import { refreshWorkspace, workspace } from "./workspace.ts";
 
-// Investigation runs in opencode on a model from OpenRouter, in a workspace
-// holding a checkout of each of grain's repos side by side: the appview and the
-// mobile apps. The agent can read code and query the appview's database
-// read-only, and nothing else: no shell, no edits, no web. That is what makes
-// it safe to show it the text of a public post. A prompt injection in the post
-// can steer what the agent reads, but it has no tool that sends anything
-// anywhere, so the most it can do is write a wrong report.
-
-const run = promisify(execFile);
-// Not itself a git repository, so opencode treats this directory as the
-// project root: every checkout under it is readable, and nothing above it is.
-export const workspace = resolve(config.stateDir, "workspace");
-
-async function refreshRepo(repo: Repo): Promise<string> {
-  const dir = join(workspace, repo.name);
-  if (!existsSync(join(dir, ".git"))) {
-    await run("git", ["clone", "--branch", repo.branch, "--depth", "500", repo.url, dir]);
-  } else {
-    await run("git", ["-C", dir, "fetch", "--depth", "500", "origin", repo.branch]);
-    await run("git", ["-C", dir, "reset", "--hard", "FETCH_HEAD"]);
-    await run("git", ["-C", dir, "clean", "-fdx"]);
-  }
-  const { stdout } = await run("git", ["-C", dir, "log", "-1", "--format=%h %s"]);
-  return `${repo.name}/ at ${stdout.trim()}`;
-}
-
-/** Brings every checkout up to date. A repo that fails to refresh is left out, not fatal. */
-export async function refreshWorkspace(): Promise<string[]> {
-  mkdirSync(workspace, { recursive: true });
-  const results = await Promise.allSettled(config.repos.map(refreshRepo));
-  return results.map((r, i) =>
-    r.status === "fulfilled" ? r.value : `${config.repos[i].name}/ could not be refreshed: ${errorText(r.reason)}`,
-  );
-}
-
-const errorText = (err: unknown) => (err instanceof Error ? err.message.split("\n")[0] : String(err));
-
-export function opencodeConfig(): Config {
-  const mcp: Config["mcp"] = config.grainDbPath
-    ? {
-        "grain-db": {
-          type: "local" as const,
-          command: ["node", resolve(import.meta.dirname, "grain-db-mcp.ts")],
-          environment: { GRAIN_DB_PATH: resolve(config.grainDbPath) },
-          enabled: true,
-        },
-      }
-    : {};
-  return {
-    model: `${config.investigation.provider}/${config.investigation.model}`,
-    autoupdate: false,
-    share: "disabled" as const,
-    // Everything but reading the checkout and the grain-db tools. `question`
-    // would wait forever for a person in a headless run.
-    tools: {
-      bash: false,
-      edit: false,
-      write: false,
-      patch: false,
-      apply_patch: false,
-      webfetch: false,
-      websearch: false,
-      codesearch: false,
-      task: false,
-      skill: false,
-      question: false,
-    },
-    permission: {
-      edit: "deny" as const,
-      bash: "deny" as const,
-      webfetch: "deny" as const,
-      external_directory: "deny" as const,
-    },
-    mcp,
-  };
-}
-
-let client: OpencodeClient | undefined;
-
-async function opencode(): Promise<OpencodeClient> {
-  if (client) return client;
-  // Sessions live under the state directory so they survive a restart and can
-  // be picked up again from the dashboard.
-  process.env.XDG_DATA_HOME = resolve(config.stateDir, "opencode-data");
-  process.env.XDG_CACHE_HOME = resolve(config.stateDir, "opencode-cache");
-  const started = await createOpencode({ port: 4096, timeout: 30_000, config: opencodeConfig() });
-  client = started.client;
-  return client;
-}
+// Investigation runs in opencode's `investigate` agent, in a workspace holding a
+// checkout of each of grain's repos side by side: the appview and the mobile
+// apps. The agent can read code and query the appview's database read-only,
+// and nothing else: no shell, no edits, no web. That is what makes it safe to
+// show it the text of a public post. A prompt injection in the post can steer
+// what the agent reads, but it has no tool that sends anything anywhere, so the
+// most it can do is write a wrong report.
 
 const PLATFORM_HINT: Record<string, string> = {
   ios: "Triage thinks this is about the iOS app, so start in grain-ios/, but the cause may be in the appview it talks to.",
@@ -148,39 +62,16 @@ export async function investigate(
   onSession: (sessionId: string) => void,
 ): Promise<{ report: string; cost: number }> {
   const checkouts = await refreshWorkspace();
-  const oc = await opencode();
-
-  const created = await oc.session.create({
-    body: { title: `#${item.id} ${item.triage?.kind ?? item.source}` },
-    query: { directory: workspace },
-  });
-  if (!created.data) throw new Error(`session.create: ${JSON.stringify(created.error)}`);
-  const sessionId = created.data.id;
+  const sessionId = await newSession(workspace, `#${item.id} ${item.triage?.kind ?? item.source}`);
   onSession(sessionId);
+  const { text, cost } = await ask(sessionId, workspace, "investigate", prompt(item, checkouts));
+  return { report: text || "(the agent finished without writing a report)", cost };
+}
 
-  const timeout = setTimeout(() => {
-    oc.session.abort({ path: { id: sessionId }, query: { directory: workspace } }).catch(() => {});
-  }, config.investigation.timeoutMs);
-
-  try {
-    const res = await oc.session.prompt({
-      path: { id: sessionId },
-      query: { directory: workspace },
-      body: {
-        model: { providerID: config.investigation.provider, modelID: config.investigation.model },
-        parts: [{ type: "text", text: prompt(item, checkouts) }],
-      },
-    });
-    if (!res.data) throw new Error(`session.prompt: ${JSON.stringify(res.error)}`);
-    const { info, parts } = res.data;
-    if (info.error) throw new Error(`${info.error.name}: ${JSON.stringify(info.error.data)}`);
-    const report = parts
-      .filter((p) => p.type === "text")
-      .map((p) => ("text" in p ? p.text : ""))
-      .join("\n")
-      .trim();
-    return { report: report || "(the agent finished without writing a report)", cost: info.cost ?? 0 };
-  } finally {
-    clearTimeout(timeout);
-  }
+/** A question from a person about an investigation, answered in the same session. */
+export async function followUp(item: Item, question: string): Promise<{ cost: number }> {
+  if (!item.session_id) throw new Error("this item has not been investigated yet");
+  await refreshWorkspace();
+  const { cost } = await ask(item.session_id, workspace, "investigate", question);
+  return { cost };
 }

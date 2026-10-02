@@ -47,7 +47,23 @@ export interface Item {
   cost: number;
   error: string;
   updated_at: string;
+  fix_repo: string;
+  fix_session_id: string;
+  fix_branch: string;
+  fix_status: FixStatus;
+  fix_summary: string;
+  fix_title: string;
+  fix_body: string;
+  fix_pr_url: string;
+  fix_error: string;
 }
+
+// A fix, at most one per item:
+//   working    the fix agent is editing
+//   ready      it finished; the diff waits for a person
+//   failed     the agent errored; fix_error says why
+//   pr_open    a person approved it and a draft pull request is open
+export type FixStatus = "" | "working" | "ready" | "failed" | "pr_open";
 
 export interface Triage {
   relevant: number;
@@ -99,6 +115,24 @@ db.exec(`
     value TEXT NOT NULL
   );
 `);
+
+// Columns added after the table first shipped. ADD COLUMN for each one a
+// database is missing, so an existing queue keeps its rows.
+const LATER_COLUMNS: Record<string, string> = {
+  fix_repo: "TEXT NOT NULL DEFAULT ''",
+  fix_session_id: "TEXT NOT NULL DEFAULT ''",
+  fix_branch: "TEXT NOT NULL DEFAULT ''",
+  fix_status: "TEXT NOT NULL DEFAULT ''",
+  fix_summary: "TEXT NOT NULL DEFAULT ''",
+  fix_title: "TEXT NOT NULL DEFAULT ''",
+  fix_body: "TEXT NOT NULL DEFAULT ''",
+  fix_pr_url: "TEXT NOT NULL DEFAULT ''",
+  fix_error: "TEXT NOT NULL DEFAULT ''",
+};
+const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
+for (const [column, type] of Object.entries(LATER_COLUMNS)) {
+  if (!existing.has(column)) db.exec(`ALTER TABLE items ADD COLUMN ${column} ${type}`);
+}
 
 const now = () => new Date().toISOString();
 
@@ -167,10 +201,9 @@ export function next(status: Status): Item | undefined {
   return row ? hydrate(row) : undefined;
 }
 
-export function update(
-  id: number,
-  fields: Partial<Pick<Item, "status" | "triage" | "route_reason" | "session_id" | "investigated_at" | "report" | "cost" | "error">>,
-): void {
+type Updatable = Omit<Item, "id" | "source" | "source_ref" | "author" | "text" | "url" | "images" | "received_at" | "updated_at">;
+
+export function update(id: number, fields: Partial<Updatable>): void {
   const sets: string[] = [];
   const values: (string | number | null)[] = [];
   for (const [key, value] of Object.entries(fields)) {
@@ -208,7 +241,18 @@ export function setCursor(name: string, value: string): void {
   ).run(name, value);
 }
 
-/** Items left mid-investigation by a restart go back on the queue. */
+/** Adds to an item's running spend. */
+export function addCost(id: number, cost: number): void {
+  db.prepare(`UPDATE items SET cost = cost + ? WHERE id = ?`).run(cost, id);
+}
+
+/**
+ * After a restart: investigations that were running go back on the queue, and
+ * fixes that were running are marked failed, since their edits may be partial.
+ */
 export function requeueInterrupted(): void {
   db.prepare(`UPDATE items SET status = 'investigate', updated_at = ? WHERE status = 'investigating'`).run(now());
+  db.prepare(
+    `UPDATE items SET fix_status = 'failed', fix_error = 'interrupted by a restart', updated_at = ? WHERE fix_status = 'working'`,
+  ).run(now());
 }

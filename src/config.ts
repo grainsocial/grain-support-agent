@@ -74,6 +74,13 @@ export const config = {
     model: optional("CLEF_MODEL", "clef"),
   },
 
+  // The grain-support-agent GitHub App, for pushing fix branches and opening
+  // draft pull requests. The key is the app's PEM private key, base64-encoded.
+  github: {
+    appId: optional("GITHUB_APP_ID"),
+    appKey: Buffer.from(secret("GITHUB_APP_KEY"), "base64").toString("utf8"),
+  },
+
   investigation: {
     // OpenRouter reads OPENROUTER_API_KEY itself, so that one key stays in the
     // environment the opencode server inherits. Everything else does not.
