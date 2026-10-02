@@ -2,8 +2,8 @@ import { config, hasOpenRouter } from "./config.ts";
 import { pollBluesky } from "./bluesky.ts";
 import { investigate } from "./investigate.ts";
 import { pollReports } from "./reports.ts";
-import { investigationsToday, next, requeueInterrupted, update } from "./store.ts";
-import { route, triage } from "./triage.ts";
+import { addCost, investigationsToday, next, requeueInterrupted, update } from "./store.ts";
+import { clefConfigured as clefReady, route, triage } from "./triage.ts";
 import { startWeb } from "./web.ts";
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -43,7 +43,7 @@ function poller(name: string, everyMs: number, poll: () => number | Promise<numb
   })();
 }
 
-const clefConfigured = Boolean(config.clef.accountId && config.clef.apiToken);
+const clefConfigured = clefReady();
 
 const wakeInvestigator = worker("investigate", 60_000, async () => {
   if (!hasOpenRouter) return false;
@@ -54,7 +54,8 @@ const wakeInvestigator = worker("investigate", 60_000, async () => {
   console.log(`investigate: #${item.id}`);
   try {
     const { report, cost } = await investigate(item, (session_id) => update(item.id, { session_id }));
-    update(item.id, { status: "reported", report, cost });
+    update(item.id, { status: "reported", report, fix_targets: "" });
+    addCost(item.id, cost);
   } catch (err) {
     update(item.id, { status: "failed", error: errorText(err) });
   }

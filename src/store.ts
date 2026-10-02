@@ -56,6 +56,8 @@ export interface Item {
   fix_body: string;
   fix_pr_url: string;
   fix_error: string;
+  /** JSON: for each repository, Clef's probability that the fix needs it. */
+  fix_targets: string;
 }
 
 // A fix, at most one per item:
@@ -128,6 +130,7 @@ const LATER_COLUMNS: Record<string, string> = {
   fix_body: "TEXT NOT NULL DEFAULT ''",
   fix_pr_url: "TEXT NOT NULL DEFAULT ''",
   fix_error: "TEXT NOT NULL DEFAULT ''",
+  fix_targets: "TEXT NOT NULL DEFAULT ''",
 };
 const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
 for (const [column, type] of Object.entries(LATER_COLUMNS)) {

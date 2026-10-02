@@ -1,16 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import MarkdownIt from "markdown-it";
+import { activity } from "./activity.ts";
 import { config } from "./config.ts";
-import { canOpenPr, defaultRepo, discardFix, fixDiff, openPr, reviseFix, startFix } from "./fix.ts";
+import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls, reviseFix, startFix } from "./fix.ts";
 import { followUp } from "./investigate.ts";
 import { transcript } from "./opencode.ts";
 import { addCost, counts, get, list, recordFeedback, update, type Item, type Status } from "./store.ts";
-import { AREAS, KINDS, PLATFORMS } from "./triage.ts";
+import { AREAS, clefConfigured, fixTargets, KINDS, PLATFORMS, preselect } from "./triage.ts";
 import { workspace } from "./workspace.ts";
 
-// The dashboard. Server-rendered HTML, no client JavaScript. It has no login of
-// its own: Caddy puts basic auth in front of it, and inside the compose network
-// nothing else talks to it.
+// The dashboard. Server-rendered HTML; the only client script polls the live
+// activity of a running agent. It has no login of its own: Caddy puts basic
+// auth in front of it, and inside the compose network nothing else talks to it.
 
 const VIEWS: Record<string, { label: string; statuses: Status[] }> = {
   inbox: { label: "Needs you", statuses: ["needs_review", "reported", "failed"] },
@@ -37,11 +38,28 @@ export const renderReport = (report: string) => markdown.render(report);
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-function page(title: string, body: string, refresh = false): string {
+// While an agent runs, swap in fresh activity every few seconds, then reload
+// once when it stops so the result shows. A fetch rather than a page refresh,
+// so text being typed into a form survives.
+const POLL = (id: number) => `<script>
+(function poll() {
+  setTimeout(async () => {
+    try {
+      const res = await fetch("/item/${id}/activity");
+      const { busy, html } = await res.json();
+      if (!busy) return location.reload();
+      document.getElementById("activity").innerHTML = html;
+    } catch {}
+    poll();
+  }, 3000);
+})();
+</script>`;
+
+function page(title: string, body: string, pollItem?: number): string {
   return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">${refresh ? '\n<meta http-equiv="refresh" content="5">' : ""}
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
 <style>
@@ -98,6 +116,21 @@ form.stack .actions { margin-top: 0; }
 .diff .hunk { color: var(--accent); }
 .diff .file { font-weight: 600; }
 h2.section { font-size: 16px; margin: 0 0 8px; }
+.live { border-color: var(--accent); }
+.live .head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.live .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 8px; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .live .dot { animation: none; } }
+.steps { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; }
+.steps li { display: flex; gap: 8px; padding: 2px 0; }
+.steps .mark { width: 14px; flex: none; text-align: center; color: var(--muted); }
+.steps .done .mark { color: var(--ok); }
+.steps .failed .mark { color: var(--bad); }
+.steps .running .mark { color: var(--accent); }
+.steps code { font-size: 12px; overflow-wrap: anywhere; }
+.writing { margin-top: 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: hidden; }
+.targets { display: flex; gap: 16px; flex-wrap: wrap; }
+.targets label { display: flex; gap: 6px; align-items: center; }
 .report { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, monospace; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; }
 table { border-collapse: collapse; font-size: 14px; }
 td { padding: 2px 12px 2px 0; }
@@ -108,7 +141,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 img { max-width: 160px; max-height: 160px; border-radius: 6px; margin: 8px 8px 0 0; }
 </style>
 </head>
-<body><main>${body}</main></body>
+<body><main>${body}</main>${pollItem !== undefined ? POLL(pollItem) : ""}</body>
 </html>`;
 }
 
@@ -204,17 +237,73 @@ function renderDiff(diff: string): string {
   return `<div class="diff">${lines.join("")}</div>`;
 }
 
-function repoOptions(selected: string): string {
-  return config.repos
-    .map((r) => `<option value="${esc(r.name)}"${r.name === selected ? " selected" : ""}>${esc(r.name)}</option>`)
-    .join("");
+/** The agent job running on an item, if any: which session, where, and how to say it. */
+function runningJob(item: Item): { sessionId: string; directory: string; label: string } | undefined {
+  if (item.fix_status === "working" && item.fix_session_id) {
+    return { sessionId: item.fix_session_id, directory: fixRoot(item), label: `Working on a fix in ${fixRepos(item).join(", ")}` };
+  }
+  if (item.fix_status === "working") return { sessionId: "", directory: "", label: "Preparing checkouts for the fix" };
+  if (chatting.has(item.id) && item.session_id) {
+    return { sessionId: item.session_id, directory: workspace, label: "Answering your question" };
+  }
+  if (item.status === "investigating") {
+    return { sessionId: item.session_id, directory: workspace, label: item.session_id ? "Investigating" : "Refreshing the checkouts" };
+  }
+  return undefined;
+}
+
+const STEP_MARK = { running: "…", done: "✓", failed: "✗" };
+
+function elapsed(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+async function activityHtml(item: Item): Promise<string> {
+  const job = runningJob(item);
+  if (!job) return "";
+  const now = job.sessionId ? await activity(job.sessionId, job.directory) : undefined;
+  const steps = now?.steps ?? [];
+  const shown = steps.slice(-25);
+  return `<div class="head">
+      <strong><span class="dot"></span>${esc(job.label)}</strong>
+      <span class="meta">${now ? `${elapsed(Date.now() - now.startedAt)} · ${steps.length} step${steps.length === 1 ? "" : "s"}${now.cost ? ` · $${now.cost.toFixed(4)}` : ""}` : "starting"}</span>
+    </div>
+    ${steps.length > shown.length ? `<p class="meta" style="margin:8px 0 0">${steps.length - shown.length} earlier steps not shown</p>` : ""}
+    ${shown.length ? `<ul class="steps">${shown.map((st) => `<li class="${st.state}"><span class="mark">${STEP_MARK[st.state]}</span><span>${esc(st.label)}${st.detail ? ` <code>${esc(st.detail.slice(0, 200))}</code>` : ""}</span></li>`).join("")}</ul>` : `<p class="meta" style="margin:8px 0 0">Waiting for the model's first step.</p>`}
+    ${now?.text ? `<div class="writing">${esc(now.text.slice(-600))}</div>` : ""}`;
+}
+
+/** Clef's read on which repositories a fix needs, asked once per report and kept. */
+async function targetsFor(item: Item): Promise<Record<string, number> | undefined> {
+  if (item.fix_targets) {
+    try {
+      return JSON.parse(item.fix_targets);
+    } catch {}
+  }
+  if (!item.report || !clefConfigured()) return undefined;
+  try {
+    const targets = await fixTargets(item.report, config.repos.map((r) => r.name));
+    update(item.id, { fix_targets: JSON.stringify(targets) });
+    return targets;
+  } catch (err) {
+    console.error("fix targets:", err);
+    return undefined;
+  }
 }
 
 async function fixPanel(item: Item): Promise<string> {
   if (!item.report) return "";
+  const targets = await targetsFor(item);
+  const picked = new Set(fixRepos(item).length ? fixRepos(item) : targets ? preselect(targets) : ["grain"]);
   const start = (label: string) => `<form method="post" action="/item/${item.id}/fix" class="stack">
-      <label class="meta" for="repo">Repository</label>
-      <select name="repo" id="repo">${repoOptions(item.fix_repo || defaultRepo(item))}</select>
+      <span class="meta">Repositories${targets ? ", preselected by Clef from the report" : ""}</span>
+      <div class="targets">${config.repos
+        .map(
+          (r) =>
+            `<label><input type="checkbox" name="repo" value="${esc(r.name)}"${picked.has(r.name) ? " checked" : ""}> ${esc(r.name)}${targets?.[r.name] !== undefined ? ` <span class="meta">${Math.round(targets[r.name] * 100)}%</span>` : ""}</label>`,
+        )
+        .join("")}</div>
       <label class="meta" for="instructions">Instructions for the fix agent (optional)</label>
       <textarea name="instructions" id="instructions" placeholder="For example: go with the second candidate cause, and keep the API unchanged"></textarea>
       <div class="actions"><button class="primary">${label}</button></div>
@@ -222,12 +311,10 @@ async function fixPanel(item: Item): Promise<string> {
 
   if (!item.fix_status) {
     return `<div class="card"><h2 class="section">Fix</h2>
-      <p class="meta" style="margin:0">The fix agent edits one repository on a branch of its own. It cannot run commands or see production data. Nothing is pushed until you approve the diff.</p>
+      <p class="meta" style="margin:0">The fix agent edits the repositories ticked below, each on a branch of its own. It cannot run commands or see production data. Nothing is pushed until you approve the diff.</p>
       ${start("Work on a fix")}</div>`;
   }
-  if (item.fix_status === "working") {
-    return `<div class="card"><h2 class="section">Fix</h2><p class="meta">The fix agent is working in ${esc(item.fix_repo)} on <code>${esc(item.fix_branch)}</code>. This page refreshes on its own.</p></div>`;
-  }
+  if (item.fix_status === "working") return "";
 
   const discard = `<form method="post" action="/item/${item.id}/discard_fix"><button>Discard fix</button></form>`;
   if (item.fix_status === "failed") {
@@ -235,30 +322,42 @@ async function fixPanel(item: Item): Promise<string> {
       <div class="report">${esc(item.fix_error)}</div>${start("Try again")}<div class="actions">${discard}</div></div>`;
   }
 
-  const { stat, diff } = await fixDiff(item);
-  const pr = canOpenPr(item.fix_repo)
+  const diffs = await fixDiffs(item);
+  const urls = prUrls(item);
+  const prRepos = diffs.map((d) => d.repo).filter(canOpenPr);
+  const patchRepos = diffs.map((d) => d.repo).filter((r) => !canOpenPr(r));
+
+  const prForm = prRepos.length
     ? `<form method="post" action="/item/${item.id}/pr" class="stack">
         <label class="meta" for="title">Pull request title</label>
         <input type="text" name="title" id="title" value="${esc(item.fix_title)}" required>
         <label class="meta" for="body">Description</label>
         <textarea name="body" id="body" style="min-height:160px">${esc(item.fix_body)}</textarea>
-        <div class="actions"><button class="primary"${diff ? "" : " disabled"}>${item.fix_pr_url ? "Push update to the pull request" : "Open draft pull request"}</button>${discard}</div>
+        <div class="actions"><button class="primary">${prRepos.every((r) => urls[r]) ? "Push update" : "Open draft pull request"}${prRepos.length > 1 ? `s in ${esc(prRepos.join(" and "))}` : ` in ${esc(prRepos[0])}`}</button></div>
       </form>`
-    : `<div class="actions"><a href="/item/${item.id}/fix.patch"><button type="button" class="primary">Download patch</button></a>${discard}</div>
-       <p class="meta">${esc(item.fix_repo)} is not on GitHub, so this fix leaves as a patch: <code>git apply</code> it in a checkout.</p>`;
+    : "";
+  const patches = patchRepos.length
+    ? `<div class="actions">${patchRepos.map((r) => `<a href="/item/${item.id}/fix.patch?repo=${encodeURIComponent(r)}"><button type="button">Download ${esc(r)} patch</button></a>`).join("")}</div>
+       <p class="meta">${esc(patchRepos.join(", "))} ${patchRepos.length === 1 ? "is" : "are"} not on GitHub, so ${patchRepos.length === 1 ? "its change leaves" : "their changes leave"} as a patch: <code>git apply</code> it in a checkout.</p>`
+    : "";
 
-  return `<div class="card"><div class="row"><h2 class="section">Fix in ${esc(item.fix_repo)}</h2>
+  return `<div class="card"><div class="row"><h2 class="section">Fix in ${esc(fixRepos(item).join(", "))}</h2>
       <span class="meta"><code>${esc(item.fix_branch)}</code></span></div>
-    ${item.fix_pr_url ? `<p>Draft pull request: <a href="${esc(item.fix_pr_url)}">${esc(item.fix_pr_url)}</a></p>` : ""}
+    ${Object.entries(urls).map(([r, u]) => `<p style="margin:4px 0">Draft pull request in ${esc(r)}: <a href="${esc(u)}">${esc(u)}</a></p>`).join("")}
+    ${item.fix_error ? `<p style="color:var(--bad)">${esc(item.fix_error)}</p>` : ""}
     ${item.fix_summary ? `<details><summary class="meta">What the agent said</summary><div class="markdown">${renderReport(item.fix_summary)}</div></details>` : ""}
-    <h3 style="font-size:14px;margin:16px 0 6px">Changes</h3>
-    ${diff ? `<pre class="meta" style="margin:0 0 8px;white-space:pre-wrap">${esc(stat.trim())}</pre>${renderDiff(diff)}` : `<p class="meta">The agent made no changes.</p>`}
+    ${
+      diffs.length
+        ? diffs.map((d) => `<h3 style="font-size:14px;margin:16px 0 6px">${esc(d.repo)}</h3><pre class="meta" style="margin:0 0 8px;white-space:pre-wrap">${esc(d.stat.trim())}</pre>${renderDiff(d.diff)}`).join("")
+        : `<p class="meta">The agent made no changes.</p>`
+    }
     <form method="post" action="/item/${item.id}/revise" class="stack">
       <label class="meta" for="request">Ask for changes</label>
       <textarea name="request" id="request" placeholder="For example: also handle the empty gallery case"></textarea>
       <div class="actions"><button>Send to the fix agent</button></div>
     </form>
-    ${pr}
+    ${prForm}${patches}
+    <div class="actions">${discard}</div>
   </div>`;
 }
 
@@ -284,7 +383,7 @@ async function detail(item: Item): Promise<string> {
   const action = (name: string, label: string, primary = false) =>
     `<form method="post" action="/item/${item.id}/${name}"><button${primary ? ' class="primary"' : ""}>${label}</button></form>`;
 
-  const busy = item.status === "investigating" || chatting.has(item.id) || item.fix_status === "working";
+  const busy = Boolean(runningJob(item));
   const chatError = chatErrors.get(item.id);
   const followUpForm = item.report
     ? `<form method="post" action="/item/${item.id}/chat" class="stack">
@@ -318,15 +417,15 @@ ${
   item.report || item.status === "investigating"
     ? `<div class="card"><div class="row"><h2 class="section">Investigation</h2>
         <span class="meta">${item.cost ? `$${item.cost.toFixed(4)} so far` : ""}</span></div>
-        ${item.report ? `<div class="markdown">${renderReport(item.report)}</div>` : `<p class="meta">Running. This page refreshes on its own.</p>`}
+        ${item.report ? `<div class="markdown">${renderReport(item.report)}</div>` : ""}
         ${await conversation(item)}
-        ${chatting.has(item.id) ? `<p class="meta">The agent is working on your question.</p>` : ""}
         ${chatError ? `<p style="color:var(--bad)">${esc(chatError)}</p>` : ""}
         ${followUpForm}</div>`
     : ""
 }
+${busy ? `<div class="card live" id="activity">${await activityHtml(item)}</div>` : ""}
 ${await fixPanel(item)}`,
-    busy,
+    busy ? item.id : undefined,
   );
 }
 
@@ -371,13 +470,19 @@ export function startWeb(port: number, onInvestigate: () => void): void {
       if (!match || !item) return send(res, 404, page("Not found", "<p>Not found.</p>"));
 
       if (req.method === "GET" && !match[2]) return send(res, 200, await detail(item));
-      if (req.method === "GET" && match[2] === "fix.patch" && item.fix_repo) {
-        const { diff } = await fixDiff(item);
+      if (req.method === "GET" && match[2] === "activity") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ busy: Boolean(runningJob(item)), html: await activityHtml(item) }));
+      }
+      if (req.method === "GET" && match[2] === "fix.patch") {
+        const repo = url.searchParams.get("repo") ?? "";
+        const found = (await fixDiffs(item)).find((d) => d.repo === repo);
+        if (!found) return send(res, 404, page("Not found", "<p>No change in that repository.</p>"));
         res.writeHead(200, {
           "content-type": "text/x-diff; charset=utf-8",
-          "content-disposition": `attachment; filename="${item.fix_repo}-${item.id}.patch"`,
+          "content-disposition": `attachment; filename="${repo}-${item.id}.patch"`,
         });
-        return res.end(diff);
+        return res.end(found.diff);
       }
       if (req.method !== "POST" || !sameOrigin(req)) return send(res, 403, page("Refused", "<p>Refused.</p>"));
 
@@ -420,7 +525,9 @@ export function startWeb(port: number, onInvestigate: () => void): void {
         case "fix": {
           if (item.fix_status === "working" || !item.report) break;
           const fields = await form(req);
-          startFix(item, fields.get("repo") ?? defaultRepo(item), fields.get("instructions") ?? "").catch(console.error);
+          const repos = fields.getAll("repo");
+          if (!repos.length) return send(res, 400, page("Pick a repository", `<p>Tick at least one repository for the fix.</p><p><a href="/item/${item.id}">Back</a></p>`));
+          startFix(item, repos, fields.get("instructions") ?? "").catch(console.error);
           break;
         }
         case "revise": {
@@ -432,7 +539,7 @@ export function startWeb(port: number, onInvestigate: () => void): void {
         case "pr": {
           const fields = await form(req);
           try {
-            await openPr(item, fields.get("title") ?? "", fields.get("body") ?? "");
+            await openPrs(item, fields.get("title") ?? "", fields.get("body") ?? "");
           } catch (err) {
             update(item.id, { fix_error: err instanceof Error ? err.message : String(err) });
             return send(res, 502, page("Pull request failed", `<p>${esc(err instanceof Error ? err.message : err)}</p><p><a href="/item/${item.id}">Back</a></p>`));

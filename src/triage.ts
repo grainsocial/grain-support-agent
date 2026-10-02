@@ -81,31 +81,33 @@ async function fetchImage(url: string): Promise<string | undefined> {
   }
 }
 
-export async function triage(item: Item): Promise<Triage> {
+export const clefConfigured = () => Boolean(config.clef.accountId && config.clef.apiToken);
+
+async function clef(state: unknown, questions: object, images: string[] = []): Promise<Record<string, ClefAnswer>> {
   const { accountId, apiToken, model } = config.clef;
   if (!accountId || !apiToken) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN are not set");
-
-  const images = (await Promise.all(item.images.map(fetchImage))).filter(Boolean);
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/cloudflare/${model}`,
-    {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        state: {
-          source: item.source === "bluesky" ? "A Bluesky post that mentions or replies to @grain.social" : "A report filed inside the grain app",
-          text: item.text,
-        },
-        questions: questions(),
-        ...(images.length ? { images } : {}),
-      }),
-    },
-  );
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/cloudflare/${model}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ model, state, questions, ...(images.length ? { images } : {}) }),
+  });
   if (!res.ok) throw new Error(`clef: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { result?: { answers: Record<string, ClefAnswer> }; answers?: Record<string, ClefAnswer> };
   const answers = body.result?.answers ?? body.answers;
   if (!answers) throw new Error(`clef: no answers in ${JSON.stringify(body).slice(0, 300)}`);
+  return answers;
+}
+
+export async function triage(item: Item): Promise<Triage> {
+  const images = (await Promise.all(item.images.map(fetchImage))).filter((i): i is string => Boolean(i));
+  const answers = await clef(
+    {
+      source: item.source === "bluesky" ? "A Bluesky post that mentions or replies to @grain.social" : "A report filed inside the grain app",
+      text: item.text,
+    },
+    questions(),
+    images,
+  );
 
   return {
     relevant: answers.relevant?.noul ?? 0,
@@ -140,4 +142,40 @@ export function route(t: Triage, source: Item["source"]): { status: Status; reas
     return { status: "investigate", reason: `${t.kind}, severity ${t.severity.toFixed(1)}` };
   }
   return { status: "triaged", reason: t.kind };
+}
+
+const REPO_DESCRIPTIONS: Record<string, string> = {
+  grain: "the appview: the server, its XRPC API and database, and the grain.social website",
+  "grain-ios": "the native iOS app",
+  "grain-android": "the native Android app",
+};
+
+/**
+ * For each repository, the probability that fixing what an investigation
+ * found needs a change there. Asked once per report, to preselect where the
+ * fix agent works.
+ */
+export async function fixTargets(report: string, repos: string[]): Promise<Record<string, number>> {
+  const questions = Object.fromEntries(
+    repos.map((name) => [
+      name,
+      {
+        type: "noul",
+        instructions: `Does fixing this need a code change in ${name}, ${REPO_DESCRIPTIONS[name] ?? `the ${name} repository`}?`,
+      },
+    ]),
+  );
+  const answers = await clef(
+    { what: "An investigation report on a problem in grain.social, a photo sharing app with a web appview and native iOS and Android apps", report },
+    questions,
+  );
+  return Object.fromEntries(repos.map((name) => [name, answers[name]?.noul ?? 0]));
+}
+
+/** The repositories a fix should start in: every likely one, or the single most likely. */
+export function preselect(targets: Record<string, number>): string[] {
+  const likely = Object.entries(targets).filter(([, p]) => p >= 0.5).map(([name]) => name);
+  if (likely.length) return likely;
+  const best = Object.entries(targets).sort((a, b) => b[1] - a[1])[0];
+  return best ? [best[0]] : [];
 }
