@@ -21,8 +21,8 @@ RUN npm install --omit=dev --no-audit --no-fund
 
 # The runner, and the Chromium its Playwright drives.
 WORKDIR /opt/runner
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npx playwright install --with-deps chromium
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund && npx playwright install --with-deps chromium
 COPY src ./src
 
 EXPOSE 8090

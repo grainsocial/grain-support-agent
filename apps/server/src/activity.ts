@@ -1,15 +1,9 @@
 import type { Message, Part } from "@opencode-ai/sdk";
+import type { Step } from "@workspace/types";
 
 // Turning an agent's messages into what the dashboard shows: each step it
 // took, in words, and what it wrote. Used for every turn in a conversation,
 // and for the one still running.
-
-export interface Step {
-  tool: string;
-  label: string;
-  detail: string;
-  state: "running" | "done" | "failed";
-}
 
 export interface TurnView {
   steps: Step[];

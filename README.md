@@ -17,7 +17,7 @@ in-app reports ───┘                         ├─ triaged (praise, ques
   a decision model on Workers AI. It answers fixed questions (is this about
   grain, what kind, which area, which platform, how severe) with a probability
   for every option. It writes no free text, so a post cannot talk its way past
-  it. Routing thresholds are in `route()` in `src/triage.ts`.
+  it. Routing thresholds are in `route()` in `apps/server/src/triage.ts`.
 - **Investigation** runs in [opencode](https://opencode.ai) on an OpenRouter
   model (GLM 5.3 by default). It works in one workspace holding
   checkouts of grain, grain-ios and grain-android, and writes a root-cause
@@ -25,7 +25,7 @@ in-app reports ───┘                         ├─ triaged (praise, ques
 - **Conversation.** Each item's page is a thread with its agent: the post,
   the triage, the investigation, then you and the agent talking. Ask it
   questions, tell it to fix the problem, ask for changes. It acts through a
-  few tools (`src/support-mcp.ts`): start a fix, revise it, read its diff,
+  few tools (`apps/server/src/support-mcp.ts`): start a fix, revise it, read its diff,
   and propose a pull request. When a fix finishes, the service tells the
   agent, and it reports back in the thread.
 - **Fixes** run in a second agent that edits a worktree of each repository
@@ -39,7 +39,7 @@ in-app reports ───┘                         ├─ triaged (praise, ques
 
 ## The safety model
 
-There are two agents (see `src/opencode.ts`), split by what they could leak.
+There are two agents (see `apps/server/src/opencode.ts`), split by what they could leak.
 
 **investigate** is the agent you talk to, and it reads text written by
 strangers. Its tools are read, grep and glob within the workspace, read-only
@@ -58,8 +58,8 @@ instructions, not from the raw post. Its work leaves the server only when you
 press the button, after reading the diff and the PR text.
 
 Secrets other than the OpenRouter key are removed from the environment before
-opencode starts. The SQL tool (`src/grain-db-mcp.ts`, guarded by
-`src/grain-db.ts`) opens the database read-only and refuses any statement that
+opencode starts. The SQL tool (`apps/server/src/grain-db-mcp.ts`, guarded by
+`apps/server/src/grain-db.ts`) opens the database read-only and refuses any statement that
 names a table holding credentials or private state: `_oauth_keys`,
 `_oauth_sessions`, `_push_tokens`, `_preferences`, `_mutes`, `_space_invites`.
 opencode's `external_directory` rule keeps the file tools inside the workspace
@@ -91,15 +91,26 @@ for approval like pull requests do.
 On OpenRouter, restrict routing to providers that neither train on nor retain
 prompts (Settings, Privacy), since prompts carry production data.
 
+## Layout
+
+An npm workspace, run with Turbo:
+
+| Path | What |
+| --- | --- |
+| `apps/server` | The service: ingest, triage, the agents, and the dashboard's JSON API under `/api`. It also hosts the built web app. Node 24 or later, running its TypeScript directly. |
+| `apps/web` | The dashboard: React, Vite, TanStack Router (file-based, `src/routes`) and TanStack Query, with shadcn components on Base UI. |
+| `apps/preview` | The screenshot runner, its own image. |
+| `packages/types` | The API's types, shared by server and web. Types only: Node's type stripping does not reach into `node_modules`, and type-only imports are erased before anything loads. |
+| `packages/ui` | The shadcn components (`npx shadcn add <name>` from `apps/web`). |
+
 ## Running locally
 
 ```sh
 npm install
 npm test
-GRAIN_DB_PATH=~/code/grain/data/grain.db OPENROUTER_API_KEY=... npm start
+npm run dev -w server   # the API on :8080; set GRAIN_DB_PATH, OPENROUTER_API_KEY, ...
+npm run dev -w web      # the dashboard on :5173, proxying /api and /shots to :8080
 ```
-
-Node 24 or later; it runs the TypeScript directly.
 
 ## Deploying
 
@@ -115,7 +126,7 @@ this repository. Everything is in `stacks/grain` in hetzner-infra:
 
 ## Screenshots
 
-`preview/` is a second image: a runner that photographs grain's web app with
+`apps/preview` is a second image: a runner that photographs grain's web app with
 a fix applied. For each run it starts its own dev stack in one container,
 [plc-sqlite](https://tangled.org/chadtmiller.com/plc-sqlite), the reference
 PDS, and grain's dev server, which seeds alice.test and friends. Then it

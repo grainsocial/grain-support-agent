@@ -1,0 +1,13 @@
+{
+  "name": "@workspace/types",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "description": "The dashboard API's types, shared by the server and the web app. Types only: the server runs TypeScript with Node's type stripping, which does not reach into node_modules, and type-only imports are erased before anything is loaded.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

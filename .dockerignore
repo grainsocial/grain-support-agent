@@ -1,2 +1,5 @@
-node_modules
-state
+**/node_modules
+**/dist
+**/.turbo
+**/state
+.git
