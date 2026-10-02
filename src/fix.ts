@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { config } from "./config.ts";
 import { botIdentity, githubRepo, openDraftPr, repoToken } from "./github.ts";
-import { newSession, prompt as ask } from "./opencode.ts";
+import { newSession, prompt as ask, resume } from "./opencode.ts";
 import { addCost, update, type Item } from "./store.ts";
 import { git, refreshWorkspace, repoDir } from "./workspace.ts";
 
@@ -93,10 +93,10 @@ function parsePr(text: string): { title: string; body: string } {
   return { title, body };
 }
 
-async function runFixAgent(item: Item, sessionId: string, text: string): Promise<void> {
+async function runFixAgent(item: Item, run: () => Promise<{ text: string; cost: number }>): Promise<void> {
   update(item.id, { fix_status: "working", fix_error: "" });
   try {
-    const result = await ask(sessionId, fixRoot(item), "fix", text);
+    const result = await run();
     addCost(item.id, result.cost);
     const pr = parsePr(result.text);
     update(item.id, {
@@ -128,6 +128,7 @@ export async function startFix(item: Item, repos: string[], instructions: string
     fix_body: "",
     fix_pr_url: "",
     fix_session_id: "",
+    fix_instructions: instructions,
   });
 
   try {
@@ -138,7 +139,7 @@ export async function startFix(item: Item, repos: string[], instructions: string
     }
     const sessionId = await newSession(fixRoot(item), `#${item.id} fix in ${repos.join(", ")}`);
     update(item.id, { fix_session_id: sessionId });
-    await runFixAgent(item, sessionId, fixPrompt(item, repos, instructions));
+    await runFixAgent(item, () => ask(sessionId, fixRoot(item), "fix", fixPrompt(item, repos, instructions)));
   } catch (err) {
     update(item.id, { fix_status: "failed", fix_error: err instanceof Error ? err.message : String(err) });
   }
@@ -147,11 +148,17 @@ export async function startFix(item: Item, repos: string[], instructions: string
 /** Asks the fix agent to change its work, in the same session. */
 export async function reviseFix(item: Item, request: string): Promise<void> {
   if (!item.fix_session_id) throw new Error("there is no fix to revise");
-  await runFixAgent(
-    item,
-    item.fix_session_id,
-    `${request.trim()}\n\nWhen you are done, reply again with the ## PR title and ## PR description sections, updated for the change as a whole.`,
-  );
+  const text = `${request.trim()}\n\nWhen you are done, reply again with the ## PR title and ## PR description sections, updated for the change as a whole.`;
+  await runFixAgent(item, () => ask(item.fix_session_id, fixRoot(item), "fix", text));
+}
+
+/**
+ * Picks up a fix a restart cut off: from its session if the agent had started,
+ * or from the top if the checkouts were still being prepared.
+ */
+export async function resumeFix(item: Item): Promise<void> {
+  if (!item.fix_session_id) return startFix(item, fixRepos(item), item.fix_instructions);
+  await runFixAgent(item, () => resume(item.fix_session_id, fixRoot(item), "fix"));
 }
 
 function baseBranch(name: string): string {
@@ -240,5 +247,6 @@ export async function discardFix(item: Item): Promise<void> {
     fix_body: "",
     fix_pr_url: "",
     fix_error: "",
+    fix_instructions: "",
   });
 }

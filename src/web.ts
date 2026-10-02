@@ -5,7 +5,7 @@ import { config } from "./config.ts";
 import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls, reviseFix, startFix } from "./fix.ts";
 import { followUp } from "./investigate.ts";
 import { transcript } from "./opencode.ts";
-import { addCost, counts, get, list, recordFeedback, update, type Item, type Status } from "./store.ts";
+import { counts, get, list, recordFeedback, update, type Item, type Status } from "./store.ts";
 import { AREAS, clefConfigured, fixTargets, KINDS, PLATFORMS, preselect } from "./triage.ts";
 import { workspace } from "./workspace.ts";
 
@@ -182,10 +182,7 @@ function options(choices: Record<string, string>, selected: string | undefined):
     .join("");
 }
 
-// Follow-up questions run in the background; these say which items have one
-// running and what went wrong with the last one.
-const chatting = new Set<number>();
-const chatErrors = new Map<number, string>();
+const chatting = (item: Item) => Boolean(item.chat_pending);
 
 function toolLine(part: { tool?: string; state?: { input?: Record<string, unknown>; status?: string } }): string {
   const input = part.state?.input ?? {};
@@ -243,7 +240,7 @@ function runningJob(item: Item): { sessionId: string; directory: string; label: 
     return { sessionId: item.fix_session_id, directory: fixRoot(item), label: `Working on a fix in ${fixRepos(item).join(", ")}` };
   }
   if (item.fix_status === "working") return { sessionId: "", directory: "", label: "Preparing checkouts for the fix" };
-  if (chatting.has(item.id) && item.session_id) {
+  if (chatting(item) && item.session_id) {
     return { sessionId: item.session_id, directory: workspace, label: "Answering your question" };
   }
   if (item.status === "investigating") {
@@ -384,12 +381,12 @@ async function detail(item: Item): Promise<string> {
     `<form method="post" action="/item/${item.id}/${name}"><button${primary ? ' class="primary"' : ""}>${label}</button></form>`;
 
   const busy = Boolean(runningJob(item));
-  const chatError = chatErrors.get(item.id);
+  const chatError = item.chat_error;
   const followUpForm = item.report
     ? `<form method="post" action="/item/${item.id}/chat" class="stack">
         <label class="meta" for="message">Ask a follow-up</label>
-        <textarea name="message" id="message" placeholder="For example: does this also affect iOS? How many users hit it this week?"${chatting.has(item.id) ? " disabled" : ""}></textarea>
-        <div class="actions"><button${chatting.has(item.id) ? " disabled" : ""}>${chatting.has(item.id) ? "The agent is answering" : "Ask"}</button></div>
+        <textarea name="message" id="message" placeholder="For example: does this also affect iOS? How many users hit it this week?"${chatting(item) ? " disabled" : ""}></textarea>
+        <div class="actions"><button${chatting(item) ? " disabled" : ""}>${chatting(item) ? "The agent is answering" : "Ask"}</button></div>
       </form>`
     : "";
 
@@ -513,13 +510,10 @@ export function startWeb(port: number, onInvestigate: () => void): void {
         }
         case "chat": {
           const message = (await form(req)).get("message")?.trim();
-          if (!message || chatting.has(item.id)) break;
-          chatting.add(item.id);
-          chatErrors.delete(item.id);
-          followUp(item, message)
-            .then(({ cost }) => addCost(item.id, cost))
-            .catch((err) => chatErrors.set(item.id, err instanceof Error ? err.message : String(err)))
-            .finally(() => chatting.delete(item.id));
+          if (!message || chatting(item) || !item.session_id) break;
+          // Marks the item as answering before its first await, so the page
+          // this redirects to already shows it.
+          followUp(item, message).catch(console.error);
           break;
         }
         case "fix": {

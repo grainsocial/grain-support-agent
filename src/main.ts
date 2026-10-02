@@ -1,8 +1,9 @@
 import { config, hasOpenRouter } from "./config.ts";
 import { pollBluesky } from "./bluesky.ts";
-import { investigate } from "./investigate.ts";
+import { resumeFix } from "./fix.ts";
+import { investigate, resumeFollowUp, resumeInvestigation } from "./investigate.ts";
 import { pollReports } from "./reports.ts";
-import { addCost, investigationsToday, next, requeueInterrupted, update } from "./store.ts";
+import { addCost, interrupted, investigationsToday, next, update, type Item } from "./store.ts";
 import { clefConfigured as clefReady, route, triage } from "./triage.ts";
 import { startWeb } from "./web.ts";
 
@@ -50,17 +51,40 @@ const wakeInvestigator = worker("investigate", 60_000, async () => {
   if (investigationsToday() >= config.investigation.maxPerDay) return false;
   const item = next("investigate");
   if (!item) return false;
-  update(item.id, { status: "investigating", investigated_at: new Date().toISOString(), error: "", report: "" });
+  // The old session goes with the old report; a restart before the new one
+  // opens must not mistake it for this run.
+  update(item.id, { status: "investigating", investigated_at: new Date().toISOString(), error: "", report: "", session_id: "" });
   console.log(`investigate: #${item.id}`);
+  await finishInvestigation(item, investigate(item, (session_id) => update(item.id, { session_id })));
+  return true;
+});
+
+async function finishInvestigation(item: Item, run: Promise<{ report: string; cost: number }>): Promise<void> {
   try {
-    const { report, cost } = await investigate(item, (session_id) => update(item.id, { session_id }));
+    const { report, cost } = await run;
     update(item.id, { status: "reported", report, fix_targets: "" });
     addCost(item.id, cost);
   } catch (err) {
     update(item.id, { status: "failed", error: errorText(err) });
   }
-  return true;
-});
+}
+
+/** Picks up whatever a restart cut off, each from where it stopped. */
+function resumeInterrupted(): void {
+  const { investigations, chats, fixes } = interrupted();
+  for (const item of investigations) {
+    console.log(`resume: investigation #${item.id}`);
+    finishInvestigation(item, resumeInvestigation(item));
+  }
+  for (const item of chats) {
+    console.log(`resume: follow-up on #${item.id}`);
+    resumeFollowUp(item).catch((err) => console.error("resume follow-up:", errorText(err)));
+  }
+  for (const item of fixes) {
+    console.log(`resume: fix on #${item.id}`);
+    resumeFix(item).catch((err) => console.error("resume fix:", errorText(err)));
+  }
+}
 
 const wakeTriage = worker("triage", 30_000, async () => {
   const item = next("new");
@@ -80,7 +104,7 @@ const wakeTriage = worker("triage", 30_000, async () => {
   return true;
 });
 
-requeueInterrupted();
+resumeInterrupted();
 startWeb(config.port, wakeInvestigator);
 
 if (config.bluesky.appPassword) poller("bluesky", config.bluesky.pollMs, pollBluesky, wakeTriage);

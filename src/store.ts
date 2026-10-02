@@ -58,6 +58,11 @@ export interface Item {
   fix_error: string;
   /** JSON: for each repository, Clef's probability that the fix needs it. */
   fix_targets: string;
+  /** What the person asked the fix agent, kept so a fix cut off before it began can start again. */
+  fix_instructions: string;
+  /** A follow-up question the investigation agent is answering. Empty when none is. */
+  chat_pending: string;
+  chat_error: string;
 }
 
 // A fix, at most one per item:
@@ -131,6 +136,9 @@ const LATER_COLUMNS: Record<string, string> = {
   fix_pr_url: "TEXT NOT NULL DEFAULT ''",
   fix_error: "TEXT NOT NULL DEFAULT ''",
   fix_targets: "TEXT NOT NULL DEFAULT ''",
+  fix_instructions: "TEXT NOT NULL DEFAULT ''",
+  chat_pending: "TEXT NOT NULL DEFAULT ''",
+  chat_error: "TEXT NOT NULL DEFAULT ''",
 };
 const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
 for (const [column, type] of Object.entries(LATER_COLUMNS)) {
@@ -250,12 +258,18 @@ export function addCost(id: number, cost: number): void {
 }
 
 /**
- * After a restart: investigations that were running go back on the queue, and
- * fixes that were running are marked failed, since their edits may be partial.
+ * Work a restart cut off. An investigation that had not yet opened a session
+ * just goes back on the queue; anything with a session is returned so it can
+ * be picked up where it stopped.
  */
-export function requeueInterrupted(): void {
-  db.prepare(`UPDATE items SET status = 'investigate', updated_at = ? WHERE status = 'investigating'`).run(now());
+export function interrupted(): { investigations: Item[]; chats: Item[]; fixes: Item[] } {
   db.prepare(
-    `UPDATE items SET fix_status = 'failed', fix_error = 'interrupted by a restart', updated_at = ? WHERE fix_status = 'working'`,
+    `UPDATE items SET status = 'investigate', updated_at = ? WHERE status = 'investigating' AND session_id = ''`,
   ).run(now());
+  const rows = (where: string) => db.prepare(`SELECT * FROM items WHERE ${where}`).all().map(hydrate);
+  return {
+    investigations: rows(`status = 'investigating'`),
+    chats: rows(`chat_pending != ''`),
+    fixes: rows(`fix_status = 'working'`),
+  };
 }

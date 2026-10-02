@@ -1,5 +1,5 @@
-import { newSession, prompt as ask } from "./opencode.ts";
-import type { Item } from "./store.ts";
+import { newSession, prompt as ask, resume } from "./opencode.ts";
+import { addCost, update, type Item } from "./store.ts";
 import { refreshWorkspace, workspace } from "./workspace.ts";
 
 // Investigation runs in opencode's `investigate` agent, in a workspace holding a
@@ -68,10 +68,37 @@ export async function investigate(
   return { report: text || "(the agent finished without writing a report)", cost };
 }
 
-/** A question from a person about an investigation, answered in the same session. */
-export async function followUp(item: Item, question: string): Promise<{ cost: number }> {
+/** Picks up an investigation a restart cut off. */
+export async function resumeInvestigation(item: Item): Promise<{ report: string; cost: number }> {
+  const { text, cost } = await resume(item.session_id, workspace, "investigate");
+  return { report: text || "(the agent finished without writing a report)", cost };
+}
+
+async function settleFollowUp(item: Item, run: Promise<{ cost: number }>): Promise<void> {
+  try {
+    const { cost } = await run;
+    addCost(item.id, cost);
+    update(item.id, { chat_pending: "", chat_error: "" });
+  } catch (err) {
+    update(item.id, { chat_pending: "", chat_error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * A question from a person about an investigation, answered in the same
+ * session with the same read-only tools. Recorded while it runs, so a restart
+ * can pick it up.
+ */
+export async function followUp(item: Item, question: string): Promise<void> {
   if (!item.session_id) throw new Error("this item has not been investigated yet");
-  await refreshWorkspace();
-  const { cost } = await ask(item.session_id, workspace, "investigate", question);
-  return { cost };
+  update(item.id, { chat_pending: question, chat_error: "" });
+  await settleFollowUp(
+    item,
+    refreshWorkspace().then(() => ask(item.session_id, workspace, "investigate", question)),
+  );
+}
+
+/** Picks up a follow-up a restart cut off. */
+export async function resumeFollowUp(item: Item): Promise<void> {
+  await settleFollowUp(item, resume(item.session_id, workspace, "investigate"));
 }

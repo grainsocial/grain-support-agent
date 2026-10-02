@@ -93,11 +93,51 @@ export async function newSession(directory: string, title: string): Promise<stri
   return created.data.id;
 }
 
+type Turn = { info: Message; parts: Part[] }[];
+
+/** The last assistant message of a turn, if the agent ended the turn rather than stopping between steps. */
+function ending(turn: Turn): { info: Message; parts: Part[] } | undefined {
+  const last = turn.filter((m) => m.info.role === "assistant").at(-1);
+  if (!last || last.info.role !== "assistant") return undefined;
+  if (last.info.error) return last;
+  return last.info.time.completed && last.info.finish && last.info.finish !== "tool-calls" ? last : undefined;
+}
+
+function result(turn: Turn): { text: string; cost: number } {
+  const last = ending(turn)!;
+  if (last.info.role === "assistant" && last.info.error) {
+    throw new Error(`${last.info.error.name}: ${JSON.stringify(last.info.error.data)}`);
+  }
+  const text = last.parts
+    .filter((p) => p.type === "text")
+    .map((p) => ("text" in p ? p.text : ""))
+    .join("\n")
+    .trim();
+  const cost = turn.reduce((sum, m) => sum + (m.info.role === "assistant" ? (m.info.cost ?? 0) : 0), 0);
+  return { text, cost };
+}
+
+/** Polls a session until the turn starting at message `from` ends, aborting it after the configured timeout. */
+async function settle(sessionId: string, directory: string, from: number): Promise<{ text: string; cost: number }> {
+  const oc = await opencode();
+  const deadline = Date.now() + config.investigation.timeoutMs;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const status = (await oc.session.status({ query: { directory } })).data?.[sessionId];
+    const turn = (await transcript(sessionId, directory)).slice(from);
+    if (status?.type !== "busy" && status?.type !== "retry" && ending(turn)) return result(turn);
+    if (Date.now() > deadline) {
+      await oc.session.abort({ path: { id: sessionId }, query: { directory } }).catch(() => {});
+      throw new Error(`stopped after ${Math.round(config.investigation.timeoutMs / 60_000)} minutes`);
+    }
+  }
+}
+
 /**
- * Sends one message and waits for the agent to finish, aborting it after the
- * configured timeout. The message is sent asynchronously and the session polled:
- * a synchronous prompt holds one HTTP request open for the whole run, and
- * Node's fetch gives up on a response that takes more than five minutes.
+ * Sends one message and waits for the agent to finish. The message is sent
+ * asynchronously and the session polled: a synchronous prompt holds one HTTP
+ * request open for the whole run, and Node's fetch gives up on a response that
+ * takes more than five minutes.
  */
 export async function prompt(
   sessionId: string,
@@ -117,31 +157,30 @@ export async function prompt(
     },
   });
   if (sent.error) throw new Error(`session.prompt: ${JSON.stringify(sent.error)}`);
+  return settle(sessionId, directory, before);
+}
 
-  const deadline = Date.now() + config.investigation.timeoutMs;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const status = (await oc.session.status({ query: { directory } })).data?.[sessionId];
-    const turn = (await transcript(sessionId, directory)).slice(before);
-    const replies = turn.filter((m) => m.info.role === "assistant");
-    const last = replies.at(-1)?.info;
-    const finished = last && last.role === "assistant" && (last.time.completed || last.error);
-    if (status?.type !== "busy" && status?.type !== "retry" && finished) {
-      if (last.error) throw new Error(`${last.error.name}: ${JSON.stringify(last.error.data)}`);
-      const out = replies
-        .at(-1)!
-        .parts.filter((p) => p.type === "text")
-        .map((p) => ("text" in p ? p.text : ""))
-        .join("\n")
-        .trim();
-      const cost = replies.reduce((sum, m) => sum + (m.info.role === "assistant" ? (m.info.cost ?? 0) : 0), 0);
-      return { text: out, cost };
-    }
-    if (Date.now() > deadline) {
-      await oc.session.abort({ path: { id: sessionId }, query: { directory } }).catch(() => {});
-      throw new Error(`stopped after ${Math.round(config.investigation.timeoutMs / 60_000)} minutes`);
-    }
-  }
+const CARRY_ON =
+  "The service restarted while you were working, so your last step may not have finished. Carry on from where you left off, and when you are done, answer the way you were asked to originally.";
+
+/**
+ * Picks up a turn a restart cut off. A restart takes the opencode server with
+ * it, but the session's messages are on disk: if the agent had already ended
+ * its turn, that is the result; otherwise it is told to carry on.
+ */
+export async function resume(sessionId: string, directory: string, agent: AgentName): Promise<{ text: string; cost: number }> {
+  const messages = await transcript(sessionId, directory);
+  let lastUser = -1;
+  messages.forEach((m, i) => {
+    if (m.info.role === "user") lastUser = i;
+  });
+  const turn = messages.slice(lastUser + 1);
+  const done = ending(turn);
+  if (done && !(done.info.role === "assistant" && done.info.error?.name === "MessageAbortedError")) return result(turn);
+  // The carry-on message starts a new turn, but what the cut-off turn spent still counts.
+  const spent = turn.reduce((sum, m) => sum + (m.info.role === "assistant" ? (m.info.cost ?? 0) : 0), 0);
+  const next = await prompt(sessionId, directory, agent, CARRY_ON);
+  return { text: next.text, cost: next.cost + spent };
 }
 
 export async function transcript(sessionId: string, directory: string): Promise<{ info: Message; parts: Part[] }[]> {
