@@ -93,7 +93,12 @@ export async function newSession(directory: string, title: string): Promise<stri
   return created.data.id;
 }
 
-/** Sends one message and waits for the agent to finish. Aborted after the configured timeout. */
+/**
+ * Sends one message and waits for the agent to finish, aborting it after the
+ * configured timeout. The message is sent asynchronously and the session polled:
+ * a synchronous prompt holds one HTTP request open for the whole run, and
+ * Node's fetch gives up on a response that takes more than five minutes.
+ */
 export async function prompt(
   sessionId: string,
   directory: string,
@@ -101,30 +106,41 @@ export async function prompt(
   text: string,
 ): Promise<{ text: string; cost: number }> {
   const oc = await opencode();
-  const timeout = setTimeout(() => {
-    oc.session.abort({ path: { id: sessionId }, query: { directory } }).catch(() => {});
-  }, config.investigation.timeoutMs);
-  try {
-    const res = await oc.session.prompt({
-      path: { id: sessionId },
-      query: { directory },
-      body: {
-        agent,
-        model: { providerID: config.investigation.provider, modelID: config.investigation.model },
-        parts: [{ type: "text", text }],
-      },
-    });
-    if (!res.data) throw new Error(`session.prompt: ${JSON.stringify(res.error)}`);
-    const { info, parts } = res.data;
-    if (info.error) throw new Error(`${info.error.name}: ${JSON.stringify(info.error.data)}`);
-    const out = parts
-      .filter((p) => p.type === "text")
-      .map((p) => ("text" in p ? p.text : ""))
-      .join("\n")
-      .trim();
-    return { text: out, cost: info.cost ?? 0 };
-  } finally {
-    clearTimeout(timeout);
+  const before = (await transcript(sessionId, directory)).length;
+  const sent = await oc.session.promptAsync({
+    path: { id: sessionId },
+    query: { directory },
+    body: {
+      agent,
+      model: { providerID: config.investigation.provider, modelID: config.investigation.model },
+      parts: [{ type: "text", text }],
+    },
+  });
+  if (sent.error) throw new Error(`session.prompt: ${JSON.stringify(sent.error)}`);
+
+  const deadline = Date.now() + config.investigation.timeoutMs;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const status = (await oc.session.status({ query: { directory } })).data?.[sessionId];
+    const turn = (await transcript(sessionId, directory)).slice(before);
+    const replies = turn.filter((m) => m.info.role === "assistant");
+    const last = replies.at(-1)?.info;
+    const finished = last && last.role === "assistant" && (last.time.completed || last.error);
+    if (status?.type !== "busy" && status?.type !== "retry" && finished) {
+      if (last.error) throw new Error(`${last.error.name}: ${JSON.stringify(last.error.data)}`);
+      const out = replies
+        .at(-1)!
+        .parts.filter((p) => p.type === "text")
+        .map((p) => ("text" in p ? p.text : ""))
+        .join("\n")
+        .trim();
+      const cost = replies.reduce((sum, m) => sum + (m.info.role === "assistant" ? (m.info.cost ?? 0) : 0), 0);
+      return { text: out, cost };
+    }
+    if (Date.now() > deadline) {
+      await oc.session.abort({ path: { id: sessionId }, query: { directory } }).catch(() => {});
+      throw new Error(`stopped after ${Math.round(config.investigation.timeoutMs / 60_000)} minutes`);
+    }
   }
 }
 

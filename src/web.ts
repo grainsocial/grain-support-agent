@@ -295,7 +295,7 @@ async function targetsFor(item: Item): Promise<Record<string, number> | undefine
 async function fixPanel(item: Item): Promise<string> {
   if (!item.report) return "";
   const targets = await targetsFor(item);
-  const picked = new Set(fixRepos(item).length ? fixRepos(item) : targets ? preselect(targets) : ["grain"]);
+  const picked = new Set(targets ? preselect(targets) : fixRepos(item).length ? fixRepos(item) : ["grain"]);
   const start = (label: string) => `<form method="post" action="/item/${item.id}/fix" class="stack">
       <span class="meta">Repositories${targets ? ", preselected by Clef from the report" : ""}</span>
       <div class="targets">${config.repos
