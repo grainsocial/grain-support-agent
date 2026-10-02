@@ -170,7 +170,7 @@ export async function startFix(item: Item, repos: string[], instructions: string
 /** Asks the fix agent to change its work, in the same session. */
 export async function reviseFix(item: Item, request: string): Promise<void> {
   if (!item.fix_session_id) throw new Error("there is no fix to revise");
-  const text = `${request.trim()}\n\nWhen you are done, reply again with the ## PR title and ## PR description sections, updated for the change as a whole.`;
+  const text = `${request.trim()}\n\nWhen you are done, reply again with the ## PR title and ## PR description sections, updated for the change as a whole, and the ## Screenshots section if the change as a whole shows on grain's website.`;
   await runFixAgent(item, () => ask(item.fix_session_id, fixRoot(item), "fix", text));
 }
 
