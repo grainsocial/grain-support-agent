@@ -9,10 +9,23 @@ Bluesky mentions ─┐                         ┌─ dismissed (not about grai
                   ├─► queue ─► Clef triage ─┼─ needs review (moderation, unsure)
 in-app reports ───┘                         ├─ triaged (praise, questions, requests)
                                             └─ investigate ─► opencode + OpenRouter ─► report
+
+classifier reports ─► queue ─► moderation brief (opencode, read-only) ─► needs you
 ```
 
 - **Ingest.** The grain.social account's notifications (mentions, replies,
   quotes) every minute, and new open rows in the appview's `_reports` table.
+  A report the appview's classifiers filed (`reported_by` is `system:<name>`)
+  comes in as its own kind of item, linked to the page on grain.social that
+  shows its subject.
+- **Moderation briefs.** A classifier report skips triage, since Clef already
+  scored it in the appview. The investigate agent gathers what a moderator
+  would look up, the scores and what the model was shown, the account's
+  other posts, earlier reports, labels and takedowns, and writes a brief with a
+  suggested outcome. It decides nothing; the item lands in front of a person,
+  who acts in grain's `/admin`. A photo's image is a link in the item, never
+  an attachment, so opening a nudity report does not put the picture on
+  screen. Briefs count toward `INVESTIGATIONS_PER_DAY`.
 - **Triage** runs on [Clef](https://developers.cloudflare.com/workers-ai/models/clef/),
   a decision model on Workers AI. It answers fixed questions (is this about
   grain, what kind, which area, which platform, how severe) with a probability

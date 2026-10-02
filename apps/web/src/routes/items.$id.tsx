@@ -28,7 +28,12 @@ function Post({ item }: { item: ItemDetail }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs">
-        {item.source === "bluesky" ? `@${item.author} on Bluesky` : `In-app report by ${item.author}`} · {when(item.receivedAt)}
+        {item.source === "bluesky"
+          ? `@${item.author} on Bluesky`
+          : item.source === "classifier"
+            ? `Filed by the ${item.author} classifier`
+            : `In-app report by ${item.author}`}{" "}
+        · {when(item.receivedAt)}
         <a href={item.url} target="_blank" rel="noopener noreferrer" className="hover:text-foreground inline-flex items-center gap-0.5">
           open <ExternalLinkIcon className="size-3" />
         </a>

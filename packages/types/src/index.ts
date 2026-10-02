@@ -28,7 +28,7 @@ export interface Triage {
 /** An item as the queue lists it. */
 export interface ItemSummary {
   id: number;
-  source: "bluesky" | "report";
+  source: "bluesky" | "report" | "classifier";
   author: string;
   text: string;
   url: string;

@@ -99,6 +99,18 @@ function resumeInterrupted(): void {
 const wakeTriage = worker("triage", 30_000, async () => {
   const item = next("new");
   if (!item) return false;
+  // A classifier report was already scored by Clef in the appview; asking again
+  // learns nothing. It goes to the agent for a brief of the evidence, and on to
+  // a person, who decides. Without an agent it goes to the person directly.
+  if (item.source === "classifier") {
+    if (hasOpenRouter) {
+      update(item.id, { status: "investigate", route_reason: "classifier report: gathering evidence" });
+      wakeInvestigator();
+    } else {
+      update(item.id, { status: "needs_review", route_reason: "classifier report" });
+    }
+    return true;
+  }
   if (!clefConfigured) {
     update(item.id, { status: "needs_review", route_reason: "triage is not configured" });
     return true;

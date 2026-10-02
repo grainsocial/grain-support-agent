@@ -44,7 +44,11 @@ function Queue() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm font-medium">
                   <span className="text-muted-foreground">#{item.id}</span>{" "}
-                  {item.source === "bluesky" ? `@${item.author}` : "In-app report"}
+                  {item.source === "bluesky"
+                    ? `@${item.author}`
+                    : item.source === "classifier"
+                      ? `${item.author} classifier`
+                      : "In-app report"}
                 </span>
                 <ItemBadges item={item} />
               </div>

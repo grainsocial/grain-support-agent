@@ -3,8 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config.ts";
 
-// The work queue. One row per thing that came in from outside: a Bluesky post
-// or a user report. `status` is where it sits in the pipeline:
+// The work queue. One row per thing that came in from outside: a Bluesky post,
+// a user report, or a report one of the appview's classifiers filed. `status` is where it sits in the pipeline:
 //
 //   new           waiting for triage
 //   needs_review  triage was unsure, or it is a moderation matter; a person looks
@@ -27,7 +27,7 @@ export type Status =
   | "done"
   | "dismissed";
 
-export type Source = "bluesky" | "report";
+export type Source = "bluesky" | "report" | "classifier";
 
 export interface Item {
   id: number;
