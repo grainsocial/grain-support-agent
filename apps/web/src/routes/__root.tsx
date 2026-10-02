@@ -24,8 +24,7 @@ function Root() {
     <div className="bg-background text-foreground min-h-svh">
       <header className="border-b">
         <div className="mx-auto flex h-12 max-w-3xl items-center justify-between px-4">
-          <Link to="/" search={{ view: "inbox" }} className="flex items-center gap-2">
-            <img src="/logo.png" alt="" className="size-7 rounded-md" />
+          <Link to="/" search={{ view: "inbox" }} className="flex items-baseline gap-2">
             <span className="text-xl leading-none font-extrabold tracking-[-0.02em]" style={{ fontFamily: '"Syne", sans-serif' }}>
               grain
             </span>
