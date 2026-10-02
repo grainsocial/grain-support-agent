@@ -24,8 +24,12 @@ function Root() {
     <div className="bg-background text-foreground min-h-svh">
       <header className="border-b">
         <div className="mx-auto flex h-12 max-w-3xl items-center justify-between px-4">
-          <Link to="/" search={{ view: "inbox" }} className="text-sm font-semibold tracking-tight">
-            grain support
+          <Link to="/" search={{ view: "inbox" }} className="flex items-center gap-2">
+            <img src="/logo.png" alt="" className="size-7 rounded-md" />
+            <span className="text-xl leading-none font-extrabold tracking-[-0.02em]" style={{ fontFamily: '"Syne", sans-serif' }}>
+              grain
+            </span>
+            <span className="text-muted-foreground text-sm font-medium">support</span>
           </Link>
           <ThemeToggle />
         </div>
