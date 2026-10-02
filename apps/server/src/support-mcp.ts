@@ -51,6 +51,13 @@ function buildServer(): McpServer {
       const item = itemFor(id, true);
       if (typeof item === "string") return refuse(item);
       if (item.fix_status === "working") return refuse("a fix is already running; use revise_fix once it finishes");
+      // A new fix replaces the old one, its branch and its pull request link.
+      // Only on purpose: the maintainer discards the old fix first.
+      if (item.fix_status === "ready" || item.fix_status === "pr_open") {
+        return refuse(
+          "there is already a fix for this item; use revise_fix to change it. To start over, the maintainer has to discard it first.",
+        );
+      }
       let chosen = (repos ?? []).filter((r) => knownRepos.includes(r));
       if (!chosen.length) {
         let targets: Record<string, number> = item.fix_targets ? JSON.parse(item.fix_targets) : {};

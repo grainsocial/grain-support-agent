@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { config } from "./config.ts";
 import { botIdentity, githubRepo, openDraftPr, repoToken, updatePrBody } from "./github.ts";
@@ -103,7 +105,7 @@ What was wrong, what you changed and why, and how a reviewer can verify it. Do n
 Only if you changed what grain's website looks like (grain/app). Up to four pages where the change shows, one per line: the path, then mobile or desktop, then android or ios if the page only shows the change on that kind of phone. For example:
 - / mobile android
 - /profile/alice.test desktop
-They are photographed signed out against seed data: the accounts alice.test, bob.test, carol.test and dave.test, with a few galleries. Leave this section out for changes nobody can see.`;
+They are photographed signed out against seed data: the accounts alice.test, bob.test, carol.test and dave.test, with a few galleries. The service takes the screenshots and puts them in the pull request; never add images or screenshots to the repository yourself. Leave this section out for changes nobody can see.`;
 }
 
 function parsePr(text: string): { title: string; body: string } {
@@ -195,33 +197,41 @@ export interface RepoDiff {
   diff: string;
 }
 
-/** Each repository's change against the commit its branch started from, new files included. Unchanged repos are left out. */
+/**
+ * Each repository's change against the commit its branch started from, new
+ * files included. Unchanged repos are left out.
+ *
+ * Read-only: the dashboard asks for this on every refresh, so it stages into
+ * a throwaway index rather than the checkout's own. Writing the real index
+ * here meant concurrent refreshes fought over its lock, and a restart could
+ * leave the lock behind.
+ */
 export async function fixDiffs(item: Item): Promise<RepoDiff[]> {
   const out: RepoDiff[] = [];
   for (const repo of fixRepos(item)) {
     const dir = join(fixRoot(item), repo);
     if (!existsSync(dir)) continue;
-    await git(["-C", dir, "add", "-A"]);
     const base = (
       await git(["-C", dir, "merge-base", "HEAD", `refs/remotes/origin/${baseBranch(repo)}`]).catch(() => undefined)
     )?.stdout.trim();
-    const against = base || "HEAD";
-    const [stat, diff] = await Promise.all([
-      git(["-C", dir, "diff", "--cached", "--stat", against]),
-      git(["-C", dir, "diff", "--cached", against], { maxBuffer: 20 * 1024 * 1024 }),
-    ]);
-    const baseSha = (await git(["-C", dir, "rev-parse", against])).stdout.trim();
-    if (diff.stdout.trim()) out.push({ repo, base: baseSha, stat: stat.stdout, diff: diff.stdout });
+    const against = (await git(["-C", dir, "rev-parse", base || "HEAD"])).stdout.trim();
+    const index = join(tmpdir(), `fix-index-${randomUUID()}`);
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    try {
+      await git(["-C", dir, "read-tree", against], { env });
+      await git(["-C", dir, "add", "-A"], { env });
+      const [stat, diff] = await Promise.all([
+        git(["-C", dir, "diff", "--cached", "--stat", against], { env }),
+        git(["-C", dir, "diff", "--cached", against], { env, maxBuffer: 20 * 1024 * 1024 }),
+      ]);
+      if (diff.stdout.trim()) out.push({ repo, base: against, stat: stat.stdout, diff: diff.stdout });
+    } finally {
+      rmSync(index, { force: true });
+    }
   }
   return out;
 }
 
-/**
- * For every changed repository on GitHub: commits the fix as the app's bot
- * user, pushes the branch and opens a draft pull request, or pushes the new
- * commit to the one already open. Repositories elsewhere are left for the
- * patch download.
- */
 /** A pull request's description: the agreed text, the sibling note, screenshots for grain, and the footer. */
 export function prBody(item: Item, repo: string, changed: string[], body: string): string {
   const siblings = changed.length > 1 ? `Part of one change across ${changed.join(" and ")}, on branch \`${item.fix_branch}\` in each.` : "";
@@ -248,10 +258,13 @@ export async function openPrs(item: Item, title: string, body: string): Promise<
       await git(["-C", dir, "-c", `user.name=${bot.name}`, "-c", `user.email=${bot.email}`, "commit", "-m", title.trim()]);
     }
     const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+    // Forced only for the first push, which may meet a branch a discarded fix
+    // left behind. Once a pull request is open, a push must build on what is
+    // there: a forced one could replace a reviewed change with anything.
     await git([
       "-C", dir,
       "-c", `http.extraheader=AUTHORIZATION: basic ${basic}`,
-      "push", "--force", repoConfig.url, `HEAD:refs/heads/${item.fix_branch}`,
+      "push", ...(urls[name] ? [] : ["--force"]), repoConfig.url, `HEAD:refs/heads/${item.fix_branch}`,
     ]);
     urls[name] = await openDraftPr(repo, token, {
       head: item.fix_branch,

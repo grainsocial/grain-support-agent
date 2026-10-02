@@ -6,7 +6,7 @@ import { config, type Repo } from "./config.ts";
 
 export const git = promisify(execFile).bind(null, "git") as (
   args: string[],
-  opts?: { maxBuffer?: number },
+  opts?: { maxBuffer?: number; env?: NodeJS.ProcessEnv },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 // Not itself a git repository, so opencode treats this directory as the
