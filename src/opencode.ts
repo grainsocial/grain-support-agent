@@ -92,17 +92,27 @@ export function opencodeConfig(): Config {
   };
 }
 
-let client: OpencodeClient | undefined;
+let starting: Promise<OpencodeClient> | undefined;
 
-export async function opencode(): Promise<OpencodeClient> {
-  if (client) return client;
-  // Sessions live under the state directory so they survive a restart and can
-  // be picked up again from the dashboard.
-  process.env.XDG_DATA_HOME = resolve(config.stateDir, "opencode-data");
-  process.env.XDG_CACHE_HOME = resolve(config.stateDir, "opencode-cache");
-  const started = await createOpencode({ port: 4096, timeout: 30_000, config: opencodeConfig() });
-  client = started.client;
-  return client;
+/**
+ * The opencode server, started on first use. Every caller shares one start:
+ * two callers starting it at once would both try to bind the port, and the
+ * second fails with ServeError.
+ */
+export function opencode(): Promise<OpencodeClient> {
+  starting ??= (async () => {
+    // Sessions live under the state directory so they survive a restart and
+    // can be picked up again from the dashboard.
+    process.env.XDG_DATA_HOME = resolve(config.stateDir, "opencode-data");
+    process.env.XDG_CACHE_HOME = resolve(config.stateDir, "opencode-cache");
+    const started = await createOpencode({ port: 4096, timeout: 30_000, config: opencodeConfig() });
+    return started.client;
+  })().catch((err) => {
+    // Let the next caller try again rather than failing forever.
+    starting = undefined;
+    throw err;
+  });
+  return starting;
 }
 
 export async function newSession(directory: string, title: string): Promise<string> {
