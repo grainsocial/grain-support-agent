@@ -18,6 +18,7 @@ import { config } from "./config.ts";
 import { EVENT, say } from "./conversation.ts";
 import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls } from "./fix.ts";
 import { transcript } from "./opencode.ts";
+import { account } from "./reports.ts";
 import { shotsDir, shotsOf } from "./screenshots.ts";
 import { counts, get, list, recordFeedback, update, VIEWS, type Item } from "./store.ts";
 import { AREAS, KINDS, PLATFORMS } from "./triage.ts";
@@ -59,6 +60,8 @@ function summary(item: Item): ItemSummary {
     fixStatus: item.fix_status,
     working: Boolean(item.chat_pending) || item.status === "investigating" || item.fix_status === "working",
     cost: item.cost,
+    subject: item.subject_did ? account(item.subject_did) : null,
+    reporter: item.source === "report" && item.author.startsWith("did:") ? account(item.author) : null,
   };
 }
 

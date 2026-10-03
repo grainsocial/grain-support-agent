@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { Account } from "@workspace/types";
 import { config } from "./config.ts";
 import { open } from "./grain-db.ts";
 import { enqueue, getCursor, setCursor } from "./store.ts";
@@ -59,7 +60,7 @@ export function pollReports(): number {
             .join("\n"),
           url: grainUrl(r.subject_uri, (photo) => galleryOf(db, photo)),
         };
-    if (enqueue({ ...item, source_ref: String(r.id), received_at: r.created_at })) added++;
+    if (enqueue({ ...item, source_ref: String(r.id), received_at: r.created_at, subject_did: r.subject_did })) added++;
     after = Math.max(after, Number(r.id));
   }
   setCursor(CURSOR, String(after));
@@ -120,4 +121,28 @@ export function grainUrl(subject: string, galleryOf: (photoUri: string) => strin
     if (gallery) return grainUrl(gallery, () => null);
   }
   return `${GRAIN}/profile/${did}`;
+}
+
+/**
+ * An account as the dashboard shows it: handle and display name read from the
+ * appview as they are now, so a renamed account shows its current handle.
+ * Without the database there is only the DID.
+ */
+export function account(did: string): Account {
+  let handle: string | null = null;
+  let displayName: string | null = null;
+  if (config.grainDbPath) {
+    try {
+      const db = open(config.grainDbPath);
+      const repo = db.prepare(`SELECT handle FROM _repos WHERE did = ?`).get(did) as { handle: string | null } | undefined;
+      handle = repo?.handle || null;
+      const profile = db.prepare(`SELECT display_name FROM "social.grain.actor.profile" WHERE did = ? LIMIT 1`).get(did) as
+        | { display_name: string | null }
+        | undefined;
+      displayName = profile?.display_name?.trim() || null;
+    } catch {
+      // A missing table or a locked database leaves the DID, which still links.
+    }
+  }
+  return { did, handle, displayName, url: `${GRAIN}/profile/${handle ?? did}` };
 }

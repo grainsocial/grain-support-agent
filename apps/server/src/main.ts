@@ -68,7 +68,9 @@ const wakeInvestigator = worker("investigate", 60_000, async () => {
 async function finishInvestigation(item: Item, run: Promise<{ report: string; cost: number }>): Promise<void> {
   try {
     const { report, cost } = await run;
-    update(item.id, { status: "reported", report, fix_targets: "" });
+    // "gathering evidence" describes the wait, not the result.
+    const route_reason = item.route_reason.replace(/: gathering evidence$/, "");
+    update(item.id, { status: "reported", report, fix_targets: "", route_reason });
     addCost(item.id, cost);
   } catch (err) {
     update(item.id, { status: "failed", error: errorText(err) });

@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import type { ItemDetail, ThreadEntry } from "@workspace/types"
 import { Button } from "@workspace/ui/components/button"
 import { cn } from "@workspace/ui/lib/utils"
+import { AccountLink } from "@/components/account-link"
 import { ItemBadges } from "@/components/item-badges"
 import { AgentMessage } from "@/components/thread/agent-message"
 import { Composer } from "@/components/thread/composer"
@@ -32,13 +33,24 @@ function Post({ item }: { item: ItemDetail }) {
           ? `@${item.author} on Bluesky`
           : item.source === "classifier"
             ? `Filed by the ${item.author} classifier`
-            : `In-app report by ${item.author}`}{" "}
+            : "In-app report"}
+        {item.reporter && (
+          <>
+            {" "}
+            by <AccountLink account={item.reporter} />
+          </>
+        )}{" "}
         · {when(item.receivedAt)}
         <a href={item.url} target="_blank" rel="noopener noreferrer" className="hover:text-foreground inline-flex items-center gap-0.5">
           open <ExternalLinkIcon className="size-3" />
         </a>
       </span>
       <div className="bg-card rounded-xl border px-4 py-3">
+        {item.subject && (
+          <div className="mb-2 text-sm">
+            <AccountLink account={item.subject} />
+          </div>
+        )}
         <p className="text-sm whitespace-pre-wrap">{item.text}</p>
         {item.images.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">

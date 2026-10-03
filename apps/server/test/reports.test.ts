@@ -19,11 +19,15 @@ grain.exec(`
     reported_by TEXT, status TEXT, created_at TEXT);
   CREATE TABLE "social.grain.photo" (uri TEXT, photo TEXT);
   CREATE TABLE "social.grain.gallery.item" (uri TEXT, gallery TEXT, item TEXT);
+  CREATE TABLE _repos (did TEXT, handle TEXT);
+  CREATE TABLE "social.grain.actor.profile" (did TEXT, display_name TEXT);
 `);
+grain.prepare(`INSERT INTO _repos VALUES (?, 'someone.bsky.social')`).run(DID);
+grain.prepare(`INSERT INTO "social.grain.actor.profile" VALUES (?, ' Someone ')`).run(DID);
 grain.prepare(`INSERT INTO "social.grain.photo" VALUES (?, ?)`).run(PHOTO, JSON.stringify({ ref: { $link: "bafyphoto" } }));
 grain.prepare(`INSERT INTO "social.grain.gallery.item" VALUES ('x', ?, ?)`).run(GALLERY, PHOTO);
 
-const { pollReports, grainUrl } = await import("../src/reports.ts");
+const { pollReports, grainUrl, account } = await import("../src/reports.ts");
 const store = await import("../src/store.ts");
 
 const report = (id: number, subject: string, label: string, reason: string, by: string) =>
@@ -53,6 +57,24 @@ test("a classifier's report is its own kind of item, linked to the page that sho
   assert.equal(byPerson.source, "report");
   assert.equal(byPerson.author, DID);
   assert.equal(byPerson.url, `https://grain.social/profile/${DID}/gallery/3gallery`);
+  assert.equal(byClassifier.subject_did, DID);
+  assert.equal(byPerson.subject_did, DID);
+});
+
+test("an account shows its handle and display name, and links by handle", () => {
+  assert.deepEqual(account(DID), {
+    did: DID,
+    handle: "someone.bsky.social",
+    displayName: "Someone",
+    url: "https://grain.social/profile/someone.bsky.social",
+  });
+  // One the appview has no row for still links, by its DID.
+  assert.deepEqual(account("did:plc:unknown"), {
+    did: "did:plc:unknown",
+    handle: null,
+    displayName: null,
+    url: "https://grain.social/profile/did:plc:unknown",
+  });
 });
 
 test("a person's report is fenced off as untrusted in the brief; a classifier's is not", async () => {

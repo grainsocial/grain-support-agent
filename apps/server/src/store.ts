@@ -65,6 +65,8 @@ export interface Item {
   chat_error: string;
   /** JSON: the fix's before and after screenshots, see screenshots.ts. */
   fix_shots: string;
+  /** For a report: the DID of the account it concerns. */
+  subject_did: string;
 }
 
 // A fix, at most one per item:
@@ -142,10 +144,21 @@ const LATER_COLUMNS: Record<string, string> = {
   chat_pending: "TEXT NOT NULL DEFAULT ''",
   chat_error: "TEXT NOT NULL DEFAULT ''",
   fix_shots: "TEXT NOT NULL DEFAULT ''",
+  subject_did: "TEXT NOT NULL DEFAULT ''",
 };
 const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
 for (const [column, type] of Object.entries(LATER_COLUMNS)) {
   if (!existing.has(column)) db.exec(`ALTER TABLE items ADD COLUMN ${column} ${type}`);
+}
+db.exec(
+  `UPDATE items SET route_reason = substr(route_reason, 1, length(route_reason) - length(': gathering evidence'))
+   WHERE route_reason LIKE '%: gathering evidence' AND status NOT IN ('investigate', 'investigating')`,
+);
+// Reports queued before subject_did existed carry the subject only in their
+// text, on the "Subject:" line the poller writes ahead of anything a person typed.
+for (const row of db.prepare(`SELECT id, text FROM items WHERE source != 'bluesky' AND subject_did = ''`).all()) {
+  const m = String(row.text).match(/^Subject: (?:at:\/\/)?(did:[a-z0-9]+:[A-Za-z0-9._:%-]+)/m);
+  if (m) db.prepare(`UPDATE items SET subject_did = ? WHERE id = ?`).run(m[1], Number(row.id));
 }
 
 const now = () => new Date().toISOString();
@@ -168,11 +181,12 @@ export function enqueue(item: {
   images?: string[];
   received_at: string;
   status?: Status;
+  subject_did?: string;
 }): boolean {
   const result = db
     .prepare(
-      `INSERT OR IGNORE INTO items (source, source_ref, author, text, url, images, received_at, status, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO items (source, source_ref, author, text, url, images, received_at, status, updated_at, subject_did)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       item.source,
@@ -184,6 +198,7 @@ export function enqueue(item: {
       item.received_at,
       item.status ?? "new",
       now(),
+      item.subject_did ?? "",
     );
   return result.changes > 0;
 }

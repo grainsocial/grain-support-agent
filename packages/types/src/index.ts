@@ -25,6 +25,16 @@ export interface Triage {
   needsReply: number;
 }
 
+/** An account on grain, as a report names it. */
+export interface Account {
+  did: string;
+  /** Null when the appview has no handle for it. */
+  handle: string | null;
+  displayName: string | null;
+  /** Its profile on grain.social. */
+  url: string;
+}
+
 /** An item as the queue lists it. */
 export interface ItemSummary {
   id: number;
@@ -40,6 +50,10 @@ export interface ItemSummary {
   /** An agent is answering or working on this item right now. */
   working: boolean;
   cost: number;
+  /** For a report, the account it concerns. */
+  subject: Account | null;
+  /** For a report filed in the app, who filed it. */
+  reporter: Account | null;
 }
 
 export interface QueueResponse {

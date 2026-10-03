@@ -3,6 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router"
 import type { View } from "@workspace/types"
 import { Card } from "@workspace/ui/components/card"
 import { Tabs, TabsList, TabsTrigger } from "@workspace/ui/components/tabs"
+import { AccountLink } from "@/components/account-link"
 import { ItemBadges } from "@/components/item-badges"
 import { queueQuery } from "@/lib/api"
 import { when } from "@/lib/format"
@@ -52,6 +53,16 @@ function Queue() {
                 </span>
                 <ItemBadges item={item} />
               </div>
+              {(item.subject || item.reporter) && (
+                <div className="flex flex-col gap-0.5 text-sm">
+                  {item.subject && <AccountLink account={item.subject} inCard />}
+                  {item.reporter && (
+                    <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
+                      reported by <AccountLink account={item.reporter} inCard />
+                    </span>
+                  )}
+                </div>
+              )}
               <p className="line-clamp-3 text-sm whitespace-pre-wrap">{item.text}</p>
               <p className="text-muted-foreground text-xs">
                 {when(item.receivedAt)}
