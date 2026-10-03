@@ -117,7 +117,7 @@ Who filed it: their handle, how long they have been on grain, how many reports t
 Whether the content looks like what the report says it is, or like a false positive, and why.
 
 ## Suggested action
-One of: dismiss the report; label the content (name the label); take the account down. One sentence on why. Then: "Act on it at https://grain.social/admin". You cannot act yourself; do not imply that you have.
+One of: dismiss the report; label the content (name the label); take the account down. One sentence on why. Then: "Tell me to act on it here, or use grain's /admin." You do not act in this brief, whatever it concludes; you act only later, when the maintainer tells you to.
 
 ## Confidence
 high, medium or low, with what would change your mind.`;

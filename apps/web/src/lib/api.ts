@@ -41,7 +41,7 @@ export type ItemAction =
   | { action: "messages"; body: { message: string } }
   | { action: "triage"; body: { kind?: string; area?: string; platform?: string } }
   | { action: "pr"; body: { title: string; body: string } }
-  | { action: "investigate" | "done" | "dismiss" | "discard-fix"; body?: undefined }
+  | { action: "investigate" | "done" | "dismiss" | "discard-fix" | "confirm-takedown" | "cancel-moderation"; body?: undefined }
 
 export function useItemAction(id: number) {
   const client = useQueryClient()

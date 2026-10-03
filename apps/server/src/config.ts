@@ -54,6 +54,12 @@ export const config = {
   // The appview's live database, opened read-only. Empty disables the reports
   // source and the SQL tool.
   grainDbPath: optional("GRAIN_DB_PATH"),
+  // The appview's /admin API, for acting on a report when the maintainer says
+  // so. The token admits this service as an admin; without it nothing is acted on.
+  grainAdmin: {
+    url: optional("GRAIN_ADMIN_URL", "http://grain:3000"),
+    token: secret("GRAIN_ADMIN_TOKEN"),
+  },
 
   // The repositories the investigation agent reads, as `name=url#branch`
   // separated by spaces. Each is checked out side by side in one workspace and

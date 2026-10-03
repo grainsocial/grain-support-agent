@@ -129,6 +129,17 @@ export interface Fix {
   live: Extract<ThreadEntry, { kind: "agent" }> | null;
 }
 
+/** An action on a report's subject, through the appview's /admin API. */
+export interface Moderation {
+  action: "dismiss" | "label" | "takedown";
+  /** For a label action, which label. */
+  label?: string;
+  /** Why, in the agent's words, for the maintainer reading the confirm card. */
+  reason?: string;
+  /** When it was taken. Absent while it waits for confirmation. */
+  at?: string;
+}
+
 export interface ItemDetail extends ItemSummary {
   images: string[];
   error: string;
@@ -138,6 +149,10 @@ export interface ItemDetail extends ItemSummary {
   fix: Fix | null;
   /** Something is running; poll for changes. */
   busy: boolean;
+  /** A takedown the agent proposed, waiting for the maintainer's click. */
+  moderationPending: Moderation | null;
+  /** What was done about the report, once it was. */
+  moderationDone: Moderation | null;
 }
 
 export interface Options {

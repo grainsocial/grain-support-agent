@@ -69,6 +69,10 @@ export interface Item {
   subject_did: string;
   /** For a report: what it is about, an at:// URI or, for an account, its DID. */
   subject_uri: string;
+  /** JSON Moderation: an action the agent proposed that waits for the maintainer's click. */
+  moderation_pending: string;
+  /** JSON Moderation: the action taken on the report's subject, once it is. */
+  moderation_done: string;
 }
 
 // A fix, at most one per item:
@@ -148,6 +152,8 @@ const LATER_COLUMNS: Record<string, string> = {
   fix_shots: "TEXT NOT NULL DEFAULT ''",
   subject_did: "TEXT NOT NULL DEFAULT ''",
   subject_uri: "TEXT NOT NULL DEFAULT ''",
+  moderation_pending: "TEXT NOT NULL DEFAULT ''",
+  moderation_done: "TEXT NOT NULL DEFAULT ''",
 };
 const existing = new Set(db.prepare(`SELECT name FROM pragma_table_info('items')`).all().map((r) => String(r.name)));
 for (const [column, type] of Object.entries(LATER_COLUMNS)) {

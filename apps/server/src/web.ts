@@ -6,6 +6,7 @@ import type {
   Fix,
   ItemDetail,
   ItemSummary,
+  Moderation,
   Options,
   PrRequest,
   QueueResponse,
@@ -18,6 +19,7 @@ import { config } from "./config.ts";
 import { EVENT, say } from "./conversation.ts";
 import { canOpenPr, discardFix, fixDiffs, fixRepos, fixRoot, openPrs, prUrls } from "./fix.ts";
 import { transcript } from "./opencode.ts";
+import { act, parse as parseModeration } from "./moderate.ts";
 import { account, subjectLink } from "./reports.ts";
 import { shotsDir, shotsOf } from "./screenshots.ts";
 import { counts, get, list, recordFeedback, update, VIEWS, type Item } from "./store.ts";
@@ -177,6 +179,8 @@ async function detail(item: Item): Promise<ItemDetail> {
   if (item.status === "investigating" && !item.session_id) thread.push({ kind: "event", text: "Refreshing the checkouts", tone: "live" });
   if (item.chat_error) thread.push({ kind: "event", text: item.chat_error, tone: "bad" });
   if (item.error && item.status === "failed") thread.push({ kind: "event", text: item.error, tone: "bad" });
+  const done = parseModeration(item.moderation_done);
+  if (done) thread.push({ kind: "event", text: MODERATED[done.action](done.label) });
   return {
     ...summary(item),
     images: item.images,
@@ -186,6 +190,8 @@ async function detail(item: Item): Promise<ItemDetail> {
     thread,
     fix: await fixOf(item),
     busy: busy(item),
+    moderationPending: parseModeration(item.moderation_pending),
+    moderationDone: done,
   };
 }
 
@@ -249,6 +255,13 @@ function serveApp(res: ServerResponse, pathname: string): void {
   });
   createReadStream(target).pipe(res);
 }
+
+/** What the thread says once a report's subject was acted on. */
+const MODERATED: Record<Moderation["action"], (label?: string) => string> = {
+  dismiss: () => "Dismissed. Every open report on the subject was closed.",
+  label: (label) => `Labelled ${label}. Every open report on the subject was closed.`,
+  takedown: () => "Taken down. Every open report on the subject was closed.",
+};
 
 const OPTIONS: Options = { kinds: KINDS, areas: AREAS, platforms: PLATFORMS };
 
@@ -330,6 +343,19 @@ async function api(req: IncomingMessage, res: ServerResponse, path: string, url:
       }
       break;
     }
+    case "confirm-takedown": {
+      const pending = parseModeration(item.moderation_pending);
+      if (pending?.action !== "takedown") return json(res, 409, { error: "there is no takedown waiting" });
+      try {
+        await act(item, pending);
+      } catch (err) {
+        return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+      }
+      break;
+    }
+    case "cancel-moderation":
+      update(item.id, { moderation_pending: "" });
+      break;
     case "discard-fix":
       if (item.fix_status === "working") return json(res, 409, { error: "the fix agent is still working" });
       await discardFix(item);

@@ -25,7 +25,13 @@ classifier reports ─┴─► queue ─► moderation brief (opencode, read-on
   would look up, the scores and what the model was shown, the account's
   other posts, earlier reports, labels and takedowns, and for a person's
   report, the reporter's own history, and writes a brief with a suggested
-  outcome. A person's reason is fenced off as untrusted text. It decides nothing; the item lands in front of a person,
+  outcome. A person's reason is fenced off as untrusted text.
+- **Acting on a report.** In an item's conversation, tell the agent to dismiss
+  the report, label the subject, or take the account down, and it does,
+  through the appview's /admin API with an admin token (`GRAIN_ADMIN_TOKEN`).
+  It acts only on the subject the item is about, only in a turn you started,
+  and a takedown waits for you to press a confirm button. Every open report on
+  the subject is closed either way. It decides nothing; the item lands in front of a person,
   who acts in grain's `/admin`. A photo's image is a link in the item, never
   an attachment, so opening a nudity report does not put the picture on
   screen. Briefs count toward `INVESTIGATIONS_PER_DAY`.
@@ -100,6 +106,8 @@ for approval like pull requests do.
 | `BSKY_IDENTIFIER` | `grain.social` | |
 | `BSKY_APP_PASSWORD` | | Without it, mentions are not polled |
 | `GRAIN_DB_PATH` | | The appview's `grain.db`. Without it, no reports and no SQL tool |
+| `GRAIN_ADMIN_URL` | `http://grain:3000` | The appview, for acting on reports |
+| `GRAIN_ADMIN_TOKEN` | | The appview's `ADMIN_API_TOKEN`. Without it, the agent cannot act on reports |
 | `REPOS` | grain, grain-ios, grain-android | `name=url#branch`, space separated |
 | `GITHUB_APP_ID`, `GITHUB_APP_KEY` | | The GitHub App fixes become pull requests as; the key is the PEM, base64-encoded. Without them, fixes download as patches |
 | `STATE_DIR` | `./state` | Queue database, opencode sessions, checkouts |

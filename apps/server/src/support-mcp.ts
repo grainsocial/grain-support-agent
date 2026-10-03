@@ -4,12 +4,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { config } from "./config.ts";
 import { fixDiffs, fixRepos, reviseFix, startFix } from "./fix.ts";
+import { act, actionable, configured as moderationConfigured, labelNames } from "./moderate.ts";
 import { get, update, type Item } from "./store.ts";
 import { clefConfigured, fixTargets, preselect } from "./triage.ts";
 import { activeTurn } from "./turns.ts";
 
 // The tools that let the agent you talk to act on its item: start a fix, ask
-// for changes to it, read its diff, and put a pull request up for approval.
+// for changes to it, read its diff, put a pull request up for approval, and
+// act on a report's subject.
 // Served over HTTP on localhost to the opencode server, which runs them for
 // the `investigate` agent only.
 //
@@ -118,6 +120,50 @@ function buildServer(): McpServer {
       if (item.fix_status !== "ready" && item.fix_status !== "pr_open") return refuse("there is no finished fix to propose");
       update(item.id, { fix_title: title, fix_body: description });
       return text("The maintainer can now see the pull request for approval.");
+    },
+  );
+
+  server.registerTool(
+    "moderate",
+    {
+      description:
+        "Act on this report's subject, on the maintainer's word only: dismiss the report, label the subject, or take the account down. It acts on the subject this item is about and nothing else. dismiss and label happen at once; takedown puts a confirm button in front of the maintainer and happens only when they press it. Every open report on the subject is closed either way.",
+      inputSchema: {
+        item: z.number().int(),
+        action: z.enum(["dismiss", "label", "takedown"]),
+        label: z.string().optional().describe("For label: which label. Leave it out otherwise."),
+        reason: z.string().describe("One sentence on why, in your words, for the maintainer."),
+      },
+    },
+    async ({ item: id, action, label, reason }) => {
+      const item = itemFor(id, true);
+      if (typeof item === "string") return refuse(item);
+      if (!moderationConfigured()) return refuse("acting on reports is not configured here; the maintainer has to use grain's /admin");
+      const why = actionable(item);
+      if (why) return refuse(why);
+
+      if (action === "label") {
+        const names = await labelNames().catch(() => null);
+        if (!names) return refuse("could not read the appview's labels; try again shortly");
+        if (!label || !names.includes(label)) return refuse(`label must be one of: ${names.join(", ")}`);
+      } else if (label) {
+        label = undefined;
+      }
+
+      if (action === "takedown") {
+        update(item.id, { moderation_pending: JSON.stringify({ action, reason }) });
+        return text("The maintainer now sees a button to confirm the takedown. Nothing has happened yet; tell them so.");
+      }
+      try {
+        await act(item, { action, label, reason });
+      } catch (err) {
+        return refuse(`the appview refused: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return text(
+        action === "dismiss"
+          ? "Dismissed. Every open report on the subject is closed and the item is done."
+          : `Labelled ${label}. Every open report on the subject is closed and the item is done.`,
+      );
     },
   );
 

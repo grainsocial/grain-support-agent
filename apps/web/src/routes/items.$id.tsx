@@ -11,6 +11,7 @@ import { ItemBadges } from "@/components/item-badges"
 import { AgentMessage } from "@/components/thread/agent-message"
 import { Composer } from "@/components/thread/composer"
 import { FixPanel } from "@/components/thread/fix-panel"
+import { TakedownCard } from "@/components/thread/takedown-card"
 import { TriageLine } from "@/components/thread/triage-line"
 import { itemQuery, useItemAction } from "@/lib/api"
 import { cost, when } from "@/lib/format"
@@ -148,6 +149,7 @@ function ItemPage() {
           <Entry key={i} entry={entry} />
         ))}
         {item.fix && <FixPanel itemId={item.id} fix={item.fix} />}
+        <TakedownCard item={item} />
         <div ref={bottom} />
       </div>
 
