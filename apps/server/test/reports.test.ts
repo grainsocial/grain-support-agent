@@ -20,14 +20,16 @@ grain.exec(`
   CREATE TABLE "social.grain.photo" (uri TEXT, photo TEXT);
   CREATE TABLE "social.grain.gallery.item" (uri TEXT, gallery TEXT, item TEXT);
   CREATE TABLE _repos (did TEXT, handle TEXT);
+  CREATE TABLE "social.grain.gallery" (uri TEXT, title TEXT);
   CREATE TABLE "social.grain.actor.profile" (did TEXT, display_name TEXT);
 `);
 grain.prepare(`INSERT INTO _repos VALUES (?, 'someone.bsky.social')`).run(DID);
+grain.prepare(`INSERT INTO "social.grain.gallery" VALUES (?, 'Nepal')`).run(GALLERY);
 grain.prepare(`INSERT INTO "social.grain.actor.profile" VALUES (?, ' Someone ')`).run(DID);
 grain.prepare(`INSERT INTO "social.grain.photo" VALUES (?, ?)`).run(PHOTO, JSON.stringify({ ref: { $link: "bafyphoto" } }));
 grain.prepare(`INSERT INTO "social.grain.gallery.item" VALUES ('x', ?, ?)`).run(GALLERY, PHOTO);
 
-const { pollReports, grainUrl, account } = await import("../src/reports.ts");
+const { pollReports, grainUrl, account, subjectLink } = await import("../src/reports.ts");
 const store = await import("../src/store.ts");
 
 const report = (id: number, subject: string, label: string, reason: string, by: string) =>
@@ -97,4 +99,11 @@ test("grain URLs: an account, a gallery, and a photo through its gallery or its 
   assert.equal(grainUrl(GALLERY, none), `https://grain.social/profile/${DID}/gallery/3gallery`);
   assert.equal(grainUrl(PHOTO, () => GALLERY), `https://grain.social/profile/${DID}/gallery/3gallery`);
   assert.equal(grainUrl(PHOTO, none), `https://grain.social/profile/${DID}`);
+});
+
+test("a subject is named the way a person would, and linked to its page", () => {
+  const gallery = `https://grain.social/profile/${DID}/gallery/3gallery`;
+  assert.deepEqual(subjectLink(DID, DID), { label: "@someone.bsky.social", url: "https://grain.social/profile/someone.bsky.social" });
+  assert.deepEqual(subjectLink(GALLERY, DID), { label: '"Nepal", a gallery by @someone.bsky.social', url: gallery });
+  assert.deepEqual(subjectLink(PHOTO, DID), { label: 'a photo by @someone.bsky.social, in "Nepal"', url: gallery });
 });

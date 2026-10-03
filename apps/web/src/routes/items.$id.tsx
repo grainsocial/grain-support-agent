@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import type { ItemDetail, ThreadEntry } from "@workspace/types"
 import { Button } from "@workspace/ui/components/button"
 import { cn } from "@workspace/ui/lib/utils"
-import { AccountLink } from "@/components/account-link"
+import { AccountLink, ReportText } from "@/components/account-link"
 import { ItemBadges } from "@/components/item-badges"
 import { AgentMessage } from "@/components/thread/agent-message"
 import { Composer } from "@/components/thread/composer"
@@ -51,7 +51,7 @@ function Post({ item }: { item: ItemDetail }) {
             <AccountLink account={item.subject} />
           </div>
         )}
-        <p className="text-sm whitespace-pre-wrap">{item.text}</p>
+        <ReportText item={item} className="text-sm whitespace-pre-wrap" />
         {item.images.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
             {item.images.map((src) => (

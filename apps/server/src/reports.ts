@@ -60,7 +60,8 @@ export function pollReports(): number {
             .join("\n"),
           url: grainUrl(r.subject_uri, (photo) => galleryOf(db, photo)),
         };
-    if (enqueue({ ...item, source_ref: String(r.id), received_at: r.created_at, subject_did: r.subject_did })) added++;
+    const subject = { subject_did: r.subject_did, subject_uri: r.subject_uri };
+    if (enqueue({ ...item, ...subject, source_ref: String(r.id), received_at: r.created_at })) added++;
     after = Math.max(after, Number(r.id));
   }
   setCursor(CURSOR, String(after));
@@ -145,4 +146,37 @@ export function account(did: string): Account {
     }
   }
   return { did, handle, displayName, url: `${GRAIN}/profile/${handle ?? did}` };
+}
+
+/**
+ * A report's subject as a person would name it, with the page that shows it:
+ * the account's handle, a gallery's title, or the gallery a photo is in.
+ */
+export function subjectLink(uri: string, did: string): { label: string; url: string } {
+  const who = account(did);
+  const handle = who.handle ? `@${who.handle}` : did;
+  if (uri.startsWith("did:")) return { label: handle, url: who.url };
+  const db = config.grainDbPath ? open(config.grainDbPath) : null;
+  const title = (gallery: string) => {
+    try {
+      const row = db?.prepare(`SELECT title FROM "social.grain.gallery" WHERE uri = ?`).get(gallery) as
+        | { title: string | null }
+        | undefined;
+      return row?.title?.trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const lookup = (photo: string) => (db ? galleryOf(db, photo) : null);
+  if (uri.includes("/social.grain.gallery/")) {
+    const t = title(uri);
+    return { label: t ? `"${t}", a gallery by ${handle}` : `a gallery by ${handle}`, url: grainUrl(uri, lookup) };
+  }
+  if (uri.includes("/social.grain.photo/")) {
+    const gallery = lookup(uri);
+    const t = gallery ? title(gallery) : null;
+    const where = t ? `in "${t}"` : gallery ? "in a gallery" : "in no gallery";
+    return { label: `a photo by ${handle}, ${where}`, url: grainUrl(uri, lookup) };
+  }
+  return { label: uri, url: grainUrl(uri, lookup) };
 }

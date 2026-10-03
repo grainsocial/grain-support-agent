@@ -52,6 +52,8 @@ export interface ItemSummary {
   cost: number;
   /** For a report, the account it concerns. */
   subject: Account | null;
+  /** For a report, what it is about, named for a person, and its page on grain.social. */
+  subjectLink: { label: string; url: string } | null;
   /** For a report filed in the app, who filed it. */
   reporter: Account | null;
 }

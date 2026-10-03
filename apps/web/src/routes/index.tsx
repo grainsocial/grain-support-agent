@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router"
 import type { View } from "@workspace/types"
 import { Card } from "@workspace/ui/components/card"
 import { Tabs, TabsList, TabsTrigger } from "@workspace/ui/components/tabs"
-import { AccountLink } from "@/components/account-link"
+import { AccountLink, ReportText } from "@/components/account-link"
 import { ItemBadges } from "@/components/item-badges"
 import { queueQuery } from "@/lib/api"
 import { when } from "@/lib/format"
@@ -63,7 +63,7 @@ function Queue() {
                   )}
                 </div>
               )}
-              <p className="line-clamp-3 text-sm whitespace-pre-wrap">{item.text}</p>
+              <ReportText item={item} inCard className="line-clamp-4 text-sm whitespace-pre-wrap" />
               <p className="text-muted-foreground text-xs">
                 {when(item.receivedAt)}
                 {item.routeReason && ` · ${item.routeReason}`}
