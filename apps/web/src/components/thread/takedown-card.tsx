@@ -23,7 +23,7 @@ export function TakedownCard({ item }: { item: ItemDetail }) {
         {pending.reason && <p className="text-muted-foreground">{pending.reason}</p>}
         <p className="text-muted-foreground text-xs">
           The account and everything it posted disappear from grain, and every open report on it is closed. It can be
-          reversed from grain&rsquo;s /admin.
+          reversed with <code>grain admin takedown {item.subject?.did ?? "<did>"} --undo</code>.
         </p>
         <div className="flex gap-2">
           <Button variant="destructive" size="sm" disabled={act.isPending} onClick={() => run("confirm-takedown", "Taken down")}>

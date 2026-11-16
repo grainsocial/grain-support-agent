@@ -1,47 +1,75 @@
-import { DatabaseSync } from "node:sqlite";
+import { constants, DatabaseSync } from "node:sqlite";
 
-// Read-only access to the appview's live database.
+// Read-only access to grain-serve's index, for the investigation agent.
 //
-// The connection is opened read-only, so SQLite itself refuses writes. The
-// checks below are about what may be *read*: some underscore tables hold
-// credentials (OAuth signing keys and sessions, push tokens) or private user
-// state, and a query from the investigation agent must never return them.
-// Table names cannot be computed at runtime in SQLite, so a name that does not
-// appear in the statement text cannot be read by it.
+// The connection is opened read-only and query-only, so SQLite itself refuses
+// writes. What may be *read* is enforced by SQLite's authorizer, which sees
+// every table and column a statement reads as it is compiled, however the
+// statement names them: through quoting, aliases, subqueries, CTEs or
+// EXPLAIN. A statement that reads a private table fails to compile, and so
+// never runs. The private tables hold credentials (OAuth keys and sessions,
+// push tokens) or what an account keeps to itself.
 
-const PRIVATE_TABLES = [
-  "_oauth_keys",
-  "_oauth_sessions",
-  "_push_tokens",
-  "_preferences",
-  "_mutes",
-  "_space_invites",
-];
+export const PRIVATE_TABLES = new Set([
+  "oauth_key",
+  "web_session",
+  "carried_cookie_key",
+  "push_token",
+  "preference",
+  "notification_pref",
+  "notification_seen",
+  "mute",
+  "story_view",
+  "space_invite",
+  "space_support",
+]);
 
-// Writes are already impossible on a read-only connection. These are the
-// things that reach past this one database or change the connection itself.
-const FORBIDDEN_WORDS = ["attach", "detach", "pragma", "load_extension", "fts3_tokenizer"];
+/**
+ * Tables that hold other tables' data outside their rows, private tables' with
+ * the rest: the file's raw pages, and the index samples ANALYZE may keep.
+ */
+const BEYOND_ROWS = new Set(["sqlite_dbpage", "dbstat", "sqlite_stat3", "sqlite_stat4"]);
+
+/** Functions that reach past this one database. */
+const FORBIDDEN_FUNCTIONS = new Set(["load_extension", "fts3_tokenizer"]);
 
 export const MAX_ROWS = 200;
 const MAX_CELL = 2000;
 
-/** Returns why a statement is refused, or undefined when it may run. */
+export const isPrivate = (table: string) => PRIVATE_TABLES.has(table.toLowerCase());
+
+/** Returns why a statement is refused before it is compiled, or undefined when it may be. */
 export function refuse(sql: string): string | undefined {
   const trimmed = sql.trim().replace(/;\s*$/, "");
   if (!trimmed) return "empty statement";
   if (trimmed.includes(";")) return "one statement at a time";
-  // Quoting and bracketing do not change which table a name refers to, so
-  // compare with them stripped: "_oauth_keys", [_oauth_keys] and `_oauth_keys`
-  // are all the same table.
-  const bare = trimmed.toLowerCase().replace(/["`[\]]/g, "");
-  if (!/^(select|with|explain)\b/.test(bare)) return "only SELECT, WITH and EXPLAIN are allowed";
-  for (const word of FORBIDDEN_WORDS) {
-    if (new RegExp(`\\b${word}\\b`).test(bare)) return `"${word}" is not allowed`;
-  }
-  for (const table of PRIVATE_TABLES) {
-    if (bare.includes(table)) return `${table} holds private data and cannot be read`;
-  }
+  if (!/^(select|with|explain)\b/i.test(trimmed)) return "only SELECT, WITH and EXPLAIN are allowed";
   return undefined;
+}
+
+/**
+ * The authorizer: a statement may select, read what is not private, call
+ * functions that stay in this database, recurse, and use the table-valued
+ * pragmas, which SQLite offers only for pragmas without side effects. Anything
+ * else fails to compile.
+ */
+function authorize(action: number, arg1: string | null, arg2: string | null): number {
+  switch (action) {
+    case constants.SQLITE_SELECT:
+    case constants.SQLITE_RECURSIVE:
+      return constants.SQLITE_OK;
+    case constants.SQLITE_READ: {
+      const table = (arg1 ?? "").toLowerCase();
+      return isPrivate(table) || BEYOND_ROWS.has(table) ? constants.SQLITE_DENY : constants.SQLITE_OK;
+    }
+    case constants.SQLITE_FUNCTION:
+      return FORBIDDEN_FUNCTIONS.has((arg2 ?? "").toLowerCase()) ? constants.SQLITE_DENY : constants.SQLITE_OK;
+    case constants.SQLITE_PRAGMA:
+      // pragma_table_info('<table>') and its like name a table as the argument.
+      return arg2 && isPrivate(arg2) ? constants.SQLITE_DENY : constants.SQLITE_OK;
+    default:
+      return constants.SQLITE_DENY;
+  }
 }
 
 let db: DatabaseSync | undefined;
@@ -49,8 +77,9 @@ let db: DatabaseSync | undefined;
 export function open(path: string): DatabaseSync {
   if (!db) {
     db = new DatabaseSync(path, { readOnly: true });
-    // The appview holds the write lock while indexing; wait rather than fail.
+    // grain-serve holds the write lock while indexing; wait rather than fail.
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = 1;");
+    db.setAuthorizer(authorize);
   }
   return db;
 }
@@ -69,12 +98,22 @@ export function query(path: string, sql: string): { rows: Record<string, unknown
   if (why) throw new Error(why);
   const rows: Record<string, unknown>[] = [];
   let truncated = false;
-  for (const row of open(path).prepare(sql).iterate()) {
-    if (rows.length >= MAX_ROWS) {
-      truncated = true;
-      break;
+  try {
+    // A table-valued pragma is authorized as it first steps, not as it compiles.
+    for (const row of open(path).prepare(sql).iterate()) {
+      if (rows.length >= MAX_ROWS) {
+        truncated = true;
+        break;
+      }
+      rows.push(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, clip(v)])));
     }
-    rows.push(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, clip(v)])));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // SQLite says what it refused, not why.
+    if (/not authorized|prohibited/.test(message)) {
+      throw new Error(`${message}: the private tables (${[...PRIVATE_TABLES].join(", ")}) and the file's raw pages cannot be read`);
+    }
+    throw err;
   }
   return { rows, truncated };
 }

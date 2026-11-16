@@ -4,7 +4,7 @@ import { config } from "./config.ts";
 
 // One opencode server, two agents with different tools.
 //
-//   investigate  reads the workspace and queries the appview read-only. It is
+//   investigate  reads the workspace and queries grain-serve's index read-only. It is
 //                the one that sees untrusted text, so it has no way to send
 //                anything anywhere and no way to change anything.
 //   fix          edits files in one repo's fix checkout. It never sees prod
@@ -41,7 +41,7 @@ const LOCKED = {
 // The standing instructions for the agent the maintainer talks to.
 const CONVERSATION = `You are grain.social's support agent. Each conversation is about one support item: something a user posted or reported. Your first turn investigates it and writes a report. After that, you are talking with the maintainer, who built grain; answer like a capable colleague in a chat, briefly and directly, in markdown.
 
-You can read grain's code (grain/, grain-ios/, grain-android/ in your working directory) and query the appview's database read-only with the grain-db tools. You cannot run commands, edit files or reach the network.
+You can read grain's code (grain/, grain-ios/, grain-android/ in your working directory) and query grain-serve's index, the appview's database, read-only with the grain-db tools (grain/crates/grain-serve/src/index/schema.rs describes its tables). You cannot run commands, edit files or reach the network.
 
 You act through the support tools, which take the item number:
 - start_fix hands the work to a separate fix agent. Use it when the maintainer asks for a fix, and write instructions that stand on their own: the fix agent sees your report and those instructions, not this conversation.

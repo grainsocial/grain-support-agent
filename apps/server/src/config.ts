@@ -51,15 +51,19 @@ export const config = {
   supportMcpPort: int("SUPPORT_MCP_PORT", 4097),
   stateDir: optional("STATE_DIR", "./state"),
 
-  // The appview's live database, opened read-only. Empty disables the reports
-  // source and the SQL tool.
-  grainDbPath: optional("GRAIN_DB_PATH"),
-  // The appview's /admin API, for acting on a report when the maintainer says
-  // so. The token admits this service as an admin; without it nothing is acted on.
-  grainAdmin: {
-    url: optional("GRAIN_ADMIN_URL", "http://grain:3000"),
-    token: secret("GRAIN_ADMIN_TOKEN"),
+  // grain-serve, for its moderation methods (social.grain.admin.*) and its
+  // public reads. Pages on grain.social are linked from here too.
+  grainUrl: optional("GRAIN_URL", "https://grain.social").replace(/\/+$/, ""),
+  // The account this service moderates as, by DID, signed in to its PDS with
+  // an app password. grain-serve admits it as an admin when GRAIN_ADMIN_DIDS
+  // names it. Without both, reports are neither read nor acted on.
+  grainModerator: {
+    identifier: optional("GRAIN_MOD_IDENTIFIER"),
+    appPassword: secret("GRAIN_MOD_APP_PASSWORD"),
   },
+  // grain-serve's index, opened read-only, for the investigation agent's SQL
+  // tool and nothing else. Empty turns the tool off.
+  grainDbPath: optional("GRAIN_DB_PATH"),
 
   // The repositories the investigation agent reads, as `name=url#branch`
   // separated by spaces. Each is checked out side by side in one workspace and

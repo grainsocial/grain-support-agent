@@ -1,3 +1,4 @@
+import { Session } from "./atproto.ts";
 import { config } from "./config.ts";
 import { enqueue, getCursor, setCursor } from "./store.ts";
 
@@ -13,74 +14,9 @@ const CURSOR = "bluesky.indexedAt";
 const FIRST_RUN_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const MAX_PAGES = 5;
 
-interface Session {
-  did: string;
-  accessJwt: string;
-  refreshJwt: string;
-  pds: string;
-}
+const account = new Session(config.bluesky.identifier, config.bluesky.appPassword, config.bluesky.pds);
 
-let session: Session | undefined;
-
-async function resolvePds(identifier: string): Promise<{ did: string; pds: string }> {
-  let did = identifier;
-  if (!did.startsWith("did:")) {
-    const res = await fetch(
-      `https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(identifier)}`,
-    );
-    if (!res.ok) throw new Error(`resolveHandle ${identifier}: ${res.status}`);
-    did = ((await res.json()) as { did: string }).did;
-  }
-  if (config.bluesky.pds) return { did, pds: config.bluesky.pds };
-  const docUrl = did.startsWith("did:web:")
-    ? `https://${did.slice("did:web:".length)}/.well-known/did.json`
-    : `https://plc.directory/${did}`;
-  const doc = (await (await fetch(docUrl)).json()) as {
-    service?: { id: string; serviceEndpoint: string }[];
-  };
-  const pds = doc.service?.find((s) => s.id === "#atproto_pds")?.serviceEndpoint;
-  if (!pds) throw new Error(`no PDS in the DID document for ${did}`);
-  return { did, pds };
-}
-
-async function login(): Promise<Session> {
-  const { pds } = await resolvePds(config.bluesky.identifier);
-  const res = await fetch(`${pds}/xrpc/com.atproto.server.createSession`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ identifier: config.bluesky.identifier, password: config.bluesky.appPassword }),
-  });
-  if (!res.ok) throw new Error(`createSession: ${res.status} ${await res.text()}`);
-  const body = (await res.json()) as { did: string; accessJwt: string; refreshJwt: string };
-  return { ...body, pds };
-}
-
-async function refresh(current: Session): Promise<Session> {
-  const res = await fetch(`${current.pds}/xrpc/com.atproto.server.refreshSession`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${current.refreshJwt}` },
-  });
-  // createSession is rate limited far harder than refresh, so it is the fallback.
-  if (!res.ok) return login();
-  const body = (await res.json()) as { did: string; accessJwt: string; refreshJwt: string };
-  return { ...body, pds: current.pds };
-}
-
-async function call(path: string): Promise<unknown> {
-  session ??= await login();
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await fetch(`${session.pds}/xrpc/${path}`, {
-      headers: { authorization: `Bearer ${session.accessJwt}`, "atproto-proxy": APPVIEW_PROXY },
-    });
-    if (res.ok) return res.json();
-    const text = await res.text();
-    if (attempt === 0 && (res.status === 401 || text.includes("ExpiredToken"))) {
-      session = await refresh(session);
-      continue;
-    }
-    throw new Error(`${path.split("?")[0]}: ${res.status} ${text}`);
-  }
-}
+const call = (path: string) => account.call(path, { headers: { "atproto-proxy": APPVIEW_PROXY } });
 
 interface Notification {
   uri: string;

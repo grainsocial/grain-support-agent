@@ -15,10 +15,11 @@ classifier reports ─┴─► queue ─► moderation brief (opencode, read-on
 ```
 
 - **Ingest.** The grain.social account's notifications (mentions, replies,
-  quotes) every minute, and new open rows in the appview's `_reports` table.
-  A report the appview's classifiers filed (`reported_by` is `system:<name>`)
-  comes in as its own kind of item, linked to the page on grain.social that
-  shows its subject.
+  quotes) every minute, and new open reports from grain-serve
+  (`social.grain.admin.listReports`). A report one of grain-serve's
+  classifiers filed (filed as grain's own DID, the classifier named at the
+  head of its reason) comes in as its own kind of item, linked to the page on
+  grain.social that shows its subject.
 - **Moderation briefs.** A report, from a classifier or a person in the app,
   skips triage: Clef already scored a classifier's, and triage's questions are
   about bugs. The investigate agent gathers what a moderator
@@ -28,13 +29,17 @@ classifier reports ─┴─► queue ─► moderation brief (opencode, read-on
   outcome. A person's reason is fenced off as untrusted text.
 - **Acting on a report.** In an item's conversation, tell the agent to dismiss
   the report, label the subject, or take the account down, and it does,
-  through the appview's /admin API with an admin token (`GRAIN_ADMIN_TOKEN`).
-  It acts only on the subject the item is about, only in a turn you started,
-  and a takedown waits for you to press a confirm button. Every open report on
-  the subject is closed either way. It decides nothing; the item lands in front of a person,
-  who acts in grain's `/admin`. A photo's image is a link in the item, never
-  an attachment, so opening a nudity report does not put the picture on
-  screen. Briefs count toward `INVESTIGATIONS_PER_DAY`.
+  through grain-serve's moderation methods as the moderating account
+  (`GRAIN_MOD_IDENTIFIER`): a takedown with
+  `com.atproto.admin.updateSubjectStatus`, a label with
+  `social.grain.admin.applyLabel`, and every open report on the subject closed
+  with `social.grain.admin.resolveReport`, resolved when the action upholds
+  it and dismissed otherwise. It acts only on the subject the item is about,
+  only in a turn you started, and a takedown waits for you to press a confirm
+  button. It decides nothing; the item lands in front of a person, who acts
+  with `grain admin`. A photo's image is a link in the item, never an
+  attachment, so opening a nudity report does not put the picture on screen.
+  Briefs count toward `INVESTIGATIONS_PER_DAY`.
 - **Triage** runs on [Clef](https://developers.cloudflare.com/workers-ai/models/clef/),
   a decision model on Workers AI. It answers fixed questions (is this about
   grain, what kind, which area, which platform, how severe) with a probability
@@ -81,9 +86,15 @@ press the button, after reading the diff and the PR text.
 
 Secrets other than the OpenRouter key are removed from the environment before
 opencode starts. The SQL tool (`apps/server/src/grain-db-mcp.ts`, guarded by
-`apps/server/src/grain-db.ts`) opens the database read-only and refuses any statement that
-names a table holding credentials or private state: `_oauth_keys`,
-`_oauth_sessions`, `_push_tokens`, `_preferences`, `_mutes`, `_space_invites`.
+`apps/server/src/grain-db.ts`) opens grain-serve's index read-only and
+query-only, and installs a SQLite authorizer that refuses, as the statement
+compiles, any read of a table holding credentials or private state:
+`oauth_key`, `web_session`, `carried_cookie_key`, `push_token`, `preference`,
+`notification_pref`, `notification_seen`, `mute`, `story_view`,
+`space_invite`, `space_support`. The authorizer sees every table a statement
+reads however it names it, through quoting, subqueries, CTEs, `EXPLAIN` or
+`pragma_table_info`, and it refuses the virtual tables that read the file's
+raw pages. `list_tables` and `describe_table` leave the private tables out.
 opencode's `external_directory` rule keeps the file tools inside the workspace
 or the fix checkout, so neither agent can read the database file directly.
 
@@ -105,9 +116,10 @@ for approval like pull requests do.
 | `CLEF_MODEL` | `clef` | `clef-flash` is faster and smaller |
 | `BSKY_IDENTIFIER` | `grain.social` | |
 | `BSKY_APP_PASSWORD` | | Without it, mentions are not polled |
-| `GRAIN_DB_PATH` | | The appview's `grain.db`. Without it, no reports and no SQL tool |
-| `GRAIN_ADMIN_URL` | `http://grain:3000` | The appview, for acting on reports |
-| `GRAIN_ADMIN_TOKEN` | | The appview's `ADMIN_API_TOKEN`. Without it, the agent cannot act on reports |
+| `GRAIN_URL` | `https://grain.social` | grain-serve, for its moderation methods and public reads; its host's `did:web` is the audience of the service tokens |
+| `GRAIN_MOD_IDENTIFIER` | | The moderating account's DID, which grain-serve's `GRAIN_ADMIN_DIDS` names |
+| `GRAIN_MOD_APP_PASSWORD` | | Its app password. Without both, reports are neither read nor acted on |
+| `GRAIN_DB_PATH` | | grain-serve's index (`index.db`, with its `-wal` and `-shm` beside it), read-only. Without it, no SQL tool |
 | `REPOS` | grain, grain-ios, grain-android | `name=url#branch`, space separated |
 | `GITHUB_APP_ID`, `GITHUB_APP_KEY` | | The GitHub App fixes become pull requests as; the key is the PEM, base64-encoded. Without them, fixes download as patches |
 | `STATE_DIR` | `./state` | Queue database, opencode sessions, checkouts |
@@ -132,7 +144,7 @@ An npm workspace, run with Turbo:
 ```sh
 npm install
 npm test
-npm run dev -w server   # the API on :8080; set GRAIN_DB_PATH, OPENROUTER_API_KEY, ...
+npm run dev -w server   # the API on :8080; set GRAIN_MOD_IDENTIFIER, OPENROUTER_API_KEY, ...
 npm run dev -w web      # the dashboard on :5173, proxying /api and /shots to :8080
 ```
 

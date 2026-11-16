@@ -48,7 +48,7 @@ function busy(item: Item): boolean {
   );
 }
 
-function summary(item: Item): ItemSummary {
+async function summary(item: Item): Promise<ItemSummary> {
   return {
     id: item.id,
     source: item.source,
@@ -62,9 +62,9 @@ function summary(item: Item): ItemSummary {
     fixStatus: item.fix_status,
     working: Boolean(item.chat_pending) || item.status === "investigating" || item.fix_status === "working",
     cost: item.cost,
-    subject: item.subject_did ? account(item.subject_did) : null,
-    subjectLink: item.subject_uri ? subjectLink(item.subject_uri, item.subject_did) : null,
-    reporter: item.source === "report" && item.author.startsWith("did:") ? account(item.author) : null,
+    subject: item.subject_did ? await account(item.subject_did) : null,
+    subjectLink: item.subject_uri ? await subjectLink(item.subject_uri, item.subject_did) : null,
+    reporter: item.source === "report" && item.author.startsWith("did:") ? await account(item.author) : null,
   };
 }
 
@@ -182,7 +182,7 @@ async function detail(item: Item): Promise<ItemDetail> {
   const done = parseModeration(item.moderation_done);
   if (done) thread.push({ kind: "event", text: MODERATED[done.action](done.label) });
   return {
-    ...summary(item),
+    ...(await summary(item)),
     images: item.images,
     error: item.error,
     chatError: item.chat_error,
@@ -275,7 +275,7 @@ async function api(req: IncomingMessage, res: ServerResponse, path: string, url:
     const body: QueueResponse = {
       view,
       views: (Object.keys(VIEWS) as View[]).map((v) => ({ view: v, label: VIEWS[v].label, count: n[v] })),
-      items: list(view).map(summary),
+      items: await Promise.all(list(view).map(summary)),
     };
     return json(res, 200, body);
   }
