@@ -6,6 +6,7 @@ import { investigate, resumeInvestigation } from "./investigate.ts";
 import { screenshotFixes, takeScreenshots } from "./screenshots.ts";
 import { startSupportMcp } from "./support-mcp.ts";
 import { during } from "./turns.ts";
+import { moderatorConfigured } from "./grain.ts";
 import { pollReports } from "./reports.ts";
 import { addCost, interrupted, investigationsToday, next, update, type Item } from "./store.ts";
 import { clefConfigured as clefReady, route, triage } from "./triage.ts";
@@ -138,8 +139,8 @@ startWeb(config.port, wakeInvestigator);
 if (config.bluesky.appPassword) poller("bluesky", config.bluesky.pollMs, pollBluesky, wakeTriage);
 else console.warn("bluesky: BSKY_APP_PASSWORD is not set, mentions are not polled");
 
-if (config.grainDbPath) poller("reports", config.reportsPollMs, pollReports, wakeTriage);
-else console.warn("reports: GRAIN_DB_PATH is not set, reports are not polled");
+if (moderatorConfigured()) poller("reports", config.reportsPollMs, pollReports, wakeTriage);
+else console.warn("reports: GRAIN_MOD_IDENTIFIER or GRAIN_MOD_APP_PASSWORD is not set, reports are not polled");
 
 if (!clefConfigured) console.warn("triage: Clef is not configured, every item goes to review");
 if (!hasOpenRouter) console.warn("investigate: OPENROUTER_API_KEY is not set, nothing is investigated");

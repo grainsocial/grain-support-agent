@@ -129,7 +129,7 @@ export interface Fix {
   live: Extract<ThreadEntry, { kind: "agent" }> | null;
 }
 
-/** An action on a report's subject, through the appview's /admin API. */
+/** An action on a report's subject, through grain-serve's moderation methods. */
 export interface Moderation {
   action: "dismiss" | "label" | "takedown";
   /** For a label action, which label. */

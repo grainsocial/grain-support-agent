@@ -138,13 +138,13 @@ function buildServer(): McpServer {
     async ({ item: id, action, label, reason }) => {
       const item = itemFor(id, true);
       if (typeof item === "string") return refuse(item);
-      if (!moderationConfigured()) return refuse("acting on reports is not configured here; the maintainer has to use grain's /admin");
+      if (!moderationConfigured()) return refuse("acting on reports is not configured here; the maintainer has to use the grain command line, `grain admin`");
       const why = actionable(item);
       if (why) return refuse(why);
 
       if (action === "label") {
         const names = await labelNames().catch(() => null);
-        if (!names) return refuse("could not read the appview's labels; try again shortly");
+        if (!names) return refuse("could not read grain's labels; try again shortly");
         if (!label || !names.includes(label)) return refuse(`label must be one of: ${names.join(", ")}`);
       } else if (label) {
         label = undefined;
@@ -157,7 +157,7 @@ function buildServer(): McpServer {
       try {
         await act(item, { action, label, reason });
       } catch (err) {
-        return refuse(`the appview refused: ${err instanceof Error ? err.message : String(err)}`);
+        return refuse(`grain refused: ${err instanceof Error ? err.message : String(err)}`);
       }
       return text(
         action === "dismiss"
